@@ -57,8 +57,8 @@ struct targetRangeStruct {
 struct relationshipStruct
 {
 	targetRangeStruct TargetRange;
-	positionAndRotation Source;
-	positionAndRotation Target;
+	int SourceIndex;
+	int TargetIndex;
 	double DegreesOfAtrraction;
 };
 
@@ -103,8 +103,9 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 	double result = 0;
 	for (int i = 0; i < srf->nRelationships; i++)
 	{
-		double dX = rs[i].Source->x - rs[i].Target->x;
-		double dY = rs[i].Source->y - rs[i].Target->y;
+		// Look up source index from relationship and retrieve object using that index.
+		double dX = cfg[rs[i].SourceIndex].x - cfg[rs[i].TargetIndex].x;
+		double dY = cfg[rs[i].SourceIndex].y - cfg[rs[i].TargetIndex].y;
 		double distance = sqrt(dX * dX + dY * dY);
 		printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
 		if (distance < rs[i].TargetRange.targetRangeStart)
@@ -156,29 +157,19 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 		while (cfgStar[obj].frozen)
 			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
 
-		printf("Selected object #: %d\n", obj);
+		//printf("Selected object #: %d\n", obj);
 		float dx = curand_normal(&rngStates[tid]);
 		dx = dx * S_SIGMA_P;
-		printf("dx: %f\n", dx);
+		//printf("dx: %f\n", dx);
 		float dy = curand_normal(&rngStates[tid]);
 		dy = dy * S_SIGMA_P;
-		printf("dy: %f\n", dy);
-		printf("Before translation: %f\n", cfgStar[obj].x);
-		printf("Before translation: %f\n", cfgStar[obj].y);
+		//printf("dy: %f\n", dy);
+		//printf("Before translation: %f\n", cfgStar[obj].x);
+		//printf("Before translation: %f\n", cfgStar[obj].y);
 		cfgStar[obj].x += dx;
 		cfgStar[obj].y += dy;
-		printf("After translation: %f\n", cfgStar[obj].x);
-		printf("After translation: %f\n", cfgStar[obj].y);
-
-		/*if (cfgStar[obj].x < 0)
-			cfgStar[obj].x = 0;
-		else if (cfgStar.x[obj] > r.rl - 0.02)
-			cfgStar.x[obj] = r.rl - 0.02;   // Values exactly at r.rl go past the raster slightly.
-
-		if (cfgStar.y[obj] < 0)
-			cfgStar.y[obj] = 0;
-		else if (cfgStar.y[obj] > r.rw - 0.02)
-			cfgStar.y[obj] = r.rw - 0.02;   // Values exactly at r.rl go past the raster slightly.*/
+		//printf("After translation: %f\n", cfgStar[obj].x);
+		//printf("After translation: %f\n", cfgStar[obj].y);
 	}
 	// Translate rotation using normal distribution
 	else if (p == 1)
@@ -240,10 +231,10 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 
 __device__ bool Accept(double costStar, double costCur, curandState *rngStates, unsigned int tid)
 {
-	//printf("(costStar - costCur):  %f\n", (costStar - costCur));
-	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
+	printf("(costStar - costCur):  %f\n", (costStar - costCur));
+	printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
 	float randomNumber = curand_uniform(&rngStates[tid]);
-	//printf("Random number: %f\n", randomNumber);
+	printf("Random number: %f\n", randomNumber);
 	return  randomNumber < fminf(1.0f, (float) exp(-BETA * (costStar - costCur)));
 }
 
@@ -282,22 +273,23 @@ __global__ void Kernel(point *p, relationshipStruct *rs, positionAndRotation* cf
 	{
 		// Create cfg Star and initialize it to cfgcurrent that will have a proposition done to it.
 		positionAndRotation* cfgStar = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-		for (int i = 0; i < srf->nObjs; i++)
+		for (int j = 0; j < srf->nObjs; j++)
 		{
-			cfgStar[i] = cfgCurrent[i];
+			cfgStar[j] = cfgCurrent[j];
 		}
 		// cfgStar contains an array with translated objects
 		propose(srf, cfgStar, rngStates, tid);
 		double costStar = Costs(srf, cfgStar, rs);
+		printf("Cost star configuration: %f\n", costStar);
+		printf("Cost best configuration: %f\n", costBest);
 		if (costStar < costBest)
 		{
 			printf("New best %f\n", costBest);
-			printf("Cost star configuration: %f\n", costStar);
-			printf("Cost best configuration: %f\n", costBest);
+
 			// Copy star into best for storage
-			for (int i = 0; i < srf->nObjs; i++)
+			for (int j = 0; j < srf->nObjs; j++)
 			{
-				cfgBest[i] = cfgStar[i];
+				cfgBest[j] = cfgStar[j];
 			}
 			costBest = costStar;
 		}
@@ -307,9 +299,13 @@ __global__ void Kernel(point *p, relationshipStruct *rs, positionAndRotation* cf
 			// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
 			printf("Star accepted as new current.\n");
 			// Copy star into current
-			for (int i = 0; i < srf->nObjs; i++)
+			for (int j = 0; j < srf->nObjs; j++)
 			{
-				cfgCurrent[i] = cfgStar[i];
+				printf("Old current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
+				cfgCurrent[j] = cfgStar[j];
+				printf("Star values of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
+				printf("New current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
+				
 			}
 			costCurrent = costStar;
 		}
@@ -329,6 +325,8 @@ __global__ void Kernel(point *p, relationshipStruct *rs, positionAndRotation* cf
 		p[index].rotX = cfgBest[i].rotX;
 		p[index].rotY = cfgBest[i].rotY;
 		p[index].rotZ = cfgBest[i].rotZ;
+
+		// Print out best
 	}
 
 	free(cfgCurrent);
@@ -421,7 +419,7 @@ int main(int argc, char **argv)
 {
 	basicCudaDeviceInformation(argc, argv);
 
-	const int N = 10;
+	const int N = 2;
 	const int NRel = 1;
 	Surface srf;
 	srf.nObjs = N;
@@ -443,10 +441,10 @@ int main(int argc, char **argv)
 	// Create relationship
 	relationshipStruct rss[1];
 	rss[0].TargetRange.targetRangeStart = 0.0;
-	rss[0].TargetRange.targetRangeEnd = 0.0;
+	rss[0].TargetRange.targetRangeEnd = 2.0;
 	rss[0].DegreesOfAtrraction = 2.0;
-	rss[0].Source = cfg[0];
-	rss[0].Target = cfg[1];
+	rss[0].SourceIndex = 0;
+	rss[0].TargetIndex = 1;
 
 	//for (int i = 0; i < NRel; i++) {
 	//	rss[i].TargetRange.targetRangeStart = 0.0;
@@ -473,7 +471,7 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 1000;
+	gpuCfg.iterations = 20;
 
 	// Point test code:
 
