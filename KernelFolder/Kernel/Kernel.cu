@@ -293,6 +293,9 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 	// Swap two objects for both location and rotation
 	else
 	{
+		if (srf->nObjs < 2) {
+			return;
+		}
 		// This can result in the same object, chance becomes increasingly smaller given more objects
 		int obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
 		while (cfgStar[obj1].frozen)
