@@ -21,6 +21,7 @@
 // helper functions and utilities to work with CUDA
 #include <helper_functions.h>
 #include <helper_cuda.h>
+#include "Kernel.h"
 
 #ifndef MAX
 #define MAX(a,b) (a > b ? a : b)
@@ -47,6 +48,9 @@ struct positionAndRotation
 	double rotY;
 	double rotZ;
 	bool frozen;
+
+	double length;
+	double width;
 };
 
 struct targetRangeStruct {
@@ -68,8 +72,19 @@ struct Surface
 	int nRelationships;
 
 	// Weights
-	float WeightFocal;
+	float WeightFocalPoint;
 	float WeightPairWise;
+	float WeightVisualBalance;
+	float WeightSymmetry;
+
+	// Centroid
+	double centroidX;
+	double centroidY;
+
+	// Focal point
+	double focalX;
+	double focalY;
+	double focalRot;
 };
 
 struct gpuConfig
@@ -85,7 +100,6 @@ struct gpuConfig
 struct point
 {
 	float x, y, z, rotX, rotY, rotZ;
-	bool frozen;
 };
 
 __global__ void initRNG(curandState *const rngStates, const unsigned int seed)
@@ -98,15 +112,44 @@ __global__ void initRNG(curandState *const rngStates, const unsigned int seed)
 	curand_init(seed + tid, tid, 0, &rngStates[tid]);
 }
 
+__device__ double Distance(float xi, float yi, float xj, float yj) 
+{
+	double dX = xi - xj;
+	double dY = yi - yj;
+	return sqrt(dX * dX + dY * dY);
+}
+
+// Theta is the rotation
+__device__ float phi(float xi, float yi, float xj, float yj, float tj)
+{
+	return atan2(yi - yj, xi - xj) - tj + PI / 2.0;
+}
+
+__device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
+{
+	float nx = 0;
+	float ny = 0;
+	float denom = 0;
+
+	for (int i = 0; i < srf->nObjs; i++)
+	{
+		float area = cfg[i].length * cfg[i].width;
+		nx += area * cfg[i].x;
+		ny += area * cfg[i].y;
+		denom += area;
+	}
+
+	// Distance between all summed areas and points divided by the areas and the room's centroid
+	return Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2);
+}
+
 __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
 	double result = 0;
 	for (int i = 0; i < srf->nRelationships; i++)
 	{
 		// Look up source index from relationship and retrieve object using that index.
-		double dX = cfg[rs[i].SourceIndex].x - cfg[rs[i].TargetIndex].x;
-		double dY = cfg[rs[i].SourceIndex].y - cfg[rs[i].TargetIndex].y;
-		double distance = sqrt(dX * dX + dY * dY);
+		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
 		printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
 		if (distance < rs[i].TargetRange.targetRangeStart)
 		{
@@ -126,10 +169,67 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 	return result;
 }
 
+__device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
+{
+	double sum = 0;
+	for (int i = 0; i < srf->nObjs; i++)
+	{
+		float phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
+		// Old implementation of grouping, all objects that belong to the category seat are used in the focal point calculation
+		// For now we default to all objects, focal point grouping will come later
+		//int s_i = s(r.c[i]);
+
+		// sum += s_i * cos(phi_fi);
+		sum += cos(phi_fi);
+	}
+
+	return sum;
+}
+
+__device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
+{
+	float sum = 0;
+	for (int i = 0; i < srf->nObjs; i++)
+	{
+		float maxVal = 0;
+
+		float ux = cos(srf->focalRot);
+		float uy = sin(srf->focalRot);
+		float s = 2 * (srf->focalX * ux + srf->focalY * uy - (cfg[i].x * ux + cfg[i].y * uy));  // s = 2 * (f * u - v * u)
+
+		// r is the reflection of g across the symmetry axis defined by p.
+		float rx_i = cfg[i].x + s * ux;
+		float ry_i = cfg[i].y + s * uy;
+		float rRot_i = 2 * srf->focalRot - cfg[i].rotY;
+		if (rRot_i < -PI)
+			rRot_i += 2 * PI;
+
+		for (int j = 0; j < srf->nObjs; j++)
+		{
+			// Types should be the same, this probably works great with their limited amount of types but will probably not work that great for us. Perhaps define a group?
+			int gamma_ij = 1;
+			float dp = Distance(cfg[j].x, cfg[j].y, rx_i, ry_i);
+			float dt = cfg[j].rotY - rRot_i;
+			if (dt > PI)
+				dt -= 2 * PI;
+
+			float val = gamma_ij * (5 - sqrt(dp) - 0.4 * fabs(dt));
+			maxVal = fmaxf(maxVal, val);
+		}
+
+		sum += maxVal;
+	}
+
+	return sum;
+}
+
 __device__ double Costs(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
 	double cost = 0;
 	cost += srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
+	cost += srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
+	cost += srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
+	cost += srf->WeightSymmetry * SymmetryCosts(srf, cfg);
 	return cost;
 }
 
@@ -193,6 +293,7 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 	// Swap two objects for both location and rotation
 	else
 	{
+		// This can result in the same object, chance becomes increasingly smaller given more objects
 		int obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
 		while (cfgStar[obj1].frozen)
 			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
@@ -373,7 +474,7 @@ extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, p
 	initRNG <<<gpuCfg->gridxDim, gpuCfg->blockxDim >> > (d_rngStates, time(NULL));
 
 	// Commented for possible later usage
-	//dim3 dimGrid(gpuCfg->gridxDim, gpuCfg->gridyDim);
+	// dim3 dimGrid(gpuCfg->gridxDim, gpuCfg->gridyDim);
 	// dim3 dimBlock(gpuCfg->blockxDim, gpuCfg->blockyDim, gpuCfg->blockzDim);
 	
 	// Block 1 dimensional, amount of threads available, configurable
@@ -424,8 +525,15 @@ int main(int argc, char **argv)
 	Surface srf;
 	srf.nObjs = N;
 	srf.nRelationships = NRel;
-	srf.WeightFocal = -2.0f;
-	srf.WeightPairWise = -3.0f;
+	srf.WeightFocalPoint = -2.0f;
+	srf.WeightPairWise = -2.0f;
+	srf.WeightVisualBalance = 1.5f;
+	srf.WeightSymmetry = -2.0;
+	srf.centroidX = 0.0;
+	srf.centroidY = 0.0;
+	srf.focalX = 5.0;
+	srf.focalY = 5.0;
+	srf.focalRot = 0.0;
 
 	positionAndRotation cfg[N];
 	for (int i = 0; i < N; i++) {
@@ -436,12 +544,14 @@ int main(int argc, char **argv)
 		cfg[i].rotY = 6.0;
 		cfg[i].rotZ = 7.0;
 		cfg[i].frozen = false;
+		cfg[i].length = 1.0;
+		cfg[i].width = 1.0;
 	}
 
 	// Create relationship
 	relationshipStruct rss[1];
-	rss[0].TargetRange.targetRangeStart = 0.0;
-	rss[0].TargetRange.targetRangeEnd = 2.0;
+	rss[0].TargetRange.targetRangeStart = 2.0;
+	rss[0].TargetRange.targetRangeEnd = 4.0;
 	rss[0].DegreesOfAtrraction = 2.0;
 	rss[0].SourceIndex = 0;
 	rss[0].TargetIndex = 1;
@@ -471,7 +581,7 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 20;
+	gpuCfg.iterations = 1000;
 
 	// Point test code:
 
