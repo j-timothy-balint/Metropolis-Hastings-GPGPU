@@ -102,12 +102,26 @@ struct point
 	float x, y, z, rotX, rotY, rotZ;
 };
 
+struct resultCosts
+{
+	float totalCosts;
+	float PairWiseCosts;
+	float VisualBalanceCosts;
+	float FocalPointCosts;
+	float SymmetryCosts;
+};
+
+struct result {
+	point *points;
+	resultCosts costs;
+};
+
 __global__ void initRNG(curandState *const rngStates, const unsigned int seed)
 {
 	// Determine thread ID
 	unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
-	printf("tid: %d\n", tid);
-	printf("seed: %d\n", seed);
+	//printf("tid: %d\n", tid);
+	//printf("seed: %d\n", seed);
 	// Initialise the RNG
 	curand_init(seed + tid, tid, 0, &rngStates[tid]);
 }
@@ -150,7 +164,7 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 	{
 		// Look up source index from relationship and retrieve object using that index.
 		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
-		printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
+		//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
 		if (distance < rs[i].TargetRange.targetRangeStart)
 		{
 			double fraction = distance / rs[i].TargetRange.targetRangeStart;
@@ -223,14 +237,22 @@ __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 	return sum;
 }
 
-__device__ double Costs(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
+__device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs)
 {
-	double cost = 0;
-	cost += srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
-	cost += srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
-	cost += srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
-	cost += srf->WeightSymmetry * SymmetryCosts(srf, cfg);
-	return cost;
+	costs->PairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
+	costs->VisualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
+	costs->FocalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
+	costs->SymmetryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
+	costs->totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts;
+}
+
+__device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo) 
+{
+	copyTo->PairWiseCosts = copyFrom->PairWiseCosts;
+	copyTo->VisualBalanceCosts = copyFrom->VisualBalanceCosts;
+	copyTo->FocalPointCosts = copyFrom->FocalPointCosts;
+	copyTo->SymmetryCosts = copyFrom->SymmetryCosts;
+	copyTo->totalCosts = copyFrom->totalCosts;
 }
 
 __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid, int max, int min)
@@ -246,7 +268,7 @@ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid
 __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState *rngStates, unsigned int tid)
 {
 	int p = generateRandomIntInRange(rngStates, tid, 2, 0);
-	printf("Selected mode: %d\n", p);
+	//printf("Selected mode: %d\n", p);
 	// Translate location using normal distribution
 	if (p == 0)
 	{
@@ -335,10 +357,10 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 
 __device__ bool Accept(double costStar, double costCur, curandState *rngStates, unsigned int tid)
 {
-	printf("(costStar - costCur):  %f\n", (costStar - costCur));
-	printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
+	//printf("(costStar - costCur):  %f\n", (costStar - costCur));
+	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
 	float randomNumber = curand_uniform(&rngStates[tid]);
-	printf("Random number: %f\n", randomNumber);
+	//printf("Random number: %f\n", randomNumber);
 	return  randomNumber < fminf(1.0f, (float) exp(-BETA * (costStar - costCur)));
 }
 
@@ -346,7 +368,7 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 // rs is an array with the length equal to the amount of relationships
 // cfg is an array with the length equal to the amount of objects
 // Surface is a basic struct
-__global__ void Kernel(point *p, relationshipStruct *rs, positionAndRotation* cfg, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
+__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, positionAndRotation* cfg, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
 {
 //    printf("current block [%d, %d]:\n",\
 //            blockIdx.y*gridDim.x+blockIdx.x,\
@@ -363,57 +385,64 @@ __global__ void Kernel(point *p, relationshipStruct *rs, positionAndRotation* cf
 	{
 		cfgCurrent[i] = cfg[i];
 	}
-
-	double costCurrent = Costs(srf, cfgCurrent, rs);
+	resultCosts* currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
+	Costs(srf, currentCosts, cfgCurrent, rs);
 	
 	positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	for (int i = 0; i < srf->nObjs; i++)
 	{
 		cfgBest[i] = cfgCurrent[i];
 	}
-	double costBest = costCurrent;
+	resultCosts* bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
+	CopyCosts(currentCosts, bestCosts);
+	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 
 	for (int i = 0; i < gpuCfg->iterations; i++)
 	{
 		// Create cfg Star and initialize it to cfgcurrent that will have a proposition done to it.
 		positionAndRotation* cfgStar = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
+		resultCosts* starCosts = (resultCosts*)malloc(sizeof(resultCosts));
 		for (int j = 0; j < srf->nObjs; j++)
 		{
 			cfgStar[j] = cfgCurrent[j];
 		}
 		// cfgStar contains an array with translated objects
 		propose(srf, cfgStar, rngStates, tid);
-		double costStar = Costs(srf, cfgStar, rs);
-		printf("Cost star configuration: %f\n", costStar);
-		printf("Cost best configuration: %f\n", costBest);
-		if (costStar < costBest)
+		Costs(srf, starCosts, cfgStar, rs);
+		//printf("Cost star configuration: %f\n", costStar);
+		//printf("Cost best configuration: %f\n", costBest);
+		// star has a better cost function than best cost, star is the new best
+		if (starCosts->totalCosts < bestCosts->totalCosts)
 		{
-			printf("New best %f\n", costBest);
+			//printf("New best %f\n", costBest);
 
 			// Copy star into best for storage
 			for (int j = 0; j < srf->nObjs; j++)
 			{
 				cfgBest[j] = cfgStar[j];
 			}
-			costBest = costStar;
+			CopyCosts(starCosts, bestCosts);
+			//printf("Threadblock: %d, New costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 		}
 
-		if (Accept(costStar, costCurrent, rngStates, tid))
+		// Check whether we continue with current or we continue with star
+		if (Accept(starCosts->totalCosts, currentCosts->totalCosts, rngStates, tid))
 		{
 			// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
-			printf("Star accepted as new current.\n");
+			//printf("Star accepted as new current.\n");
 			// Copy star into current
 			for (int j = 0; j < srf->nObjs; j++)
 			{
-				printf("Old current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
+				//printf("Old current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
 				cfgCurrent[j] = cfgStar[j];
-				printf("Star values of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
-				printf("New current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
+				//printf("Star values of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
+				//printf("New current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
 				
 			}
-			costCurrent = costStar;
+			CopyCosts(starCosts, currentCosts);
 		}
 		free(cfgStar);
+		free(starCosts);
 	}
 
 	__syncthreads();
@@ -429,15 +458,21 @@ __global__ void Kernel(point *p, relationshipStruct *rs, positionAndRotation* cf
 		p[index].rotX = cfgBest[i].rotX;
 		p[index].rotY = cfgBest[i].rotY;
 		p[index].rotZ = cfgBest[i].rotZ;
-
-		// Print out best
 	}
+	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
+	resultCostsArray[blockIdx.x].totalCosts = bestCosts->totalCosts;
+	resultCostsArray[blockIdx.x].PairWiseCosts = bestCosts->PairWiseCosts;
+	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts->VisualBalanceCosts;
+	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts->FocalPointCosts;
+	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts->SymmetryCosts;
 
 	free(cfgCurrent);
+	free(currentCosts);
 	free(cfgBest);
+	free(bestCosts);
 }
 
-extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, positionAndRotation* cfg, Surface *srf, gpuConfig *gpuCfg)
+extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, positionAndRotation* cfg, Surface *srf, gpuConfig *gpuCfg)
 {
 	// Create pointer for on gpu
 	// Determine memory size of object to transfer
@@ -448,6 +483,7 @@ extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, p
 	checkCudaErrors(cudaMalloc(&gpuRS, rsSize));
 	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
 
+	// Input
 	positionAndRotation *gpuAlgoCFG;
 	int algoCFGSize = sizeof(positionAndRotation) * srf->nObjs;
 	checkCudaErrors(cudaMalloc(&gpuAlgoCFG, algoCFGSize));
@@ -463,10 +499,17 @@ extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, p
 	checkCudaErrors(cudaMalloc(&gpuGpuConfig, gpuCFGSize));
 	checkCudaErrors(cudaMemcpy(gpuGpuConfig, gpuCfg, gpuCFGSize, cudaMemcpyHostToDevice));
 
+	// Output
 	point *gpuPointArray;
 	int pointArraySize = srf->nObjs * sizeof(point) * gpuCfg->gridxDim;
 	point *outPointArray = (point *) malloc(pointArraySize);
 	checkCudaErrors(cudaMalloc((void**)&gpuPointArray, pointArraySize));
+
+	resultCosts *gpuResultCosts;
+	int resultCostsSize = sizeof(resultCosts) * gpuCfg->gridxDim;
+	resultCosts *outResultCosts = (resultCosts *)malloc(resultCostsSize);
+	checkCudaErrors(cudaMalloc((void**)&gpuResultCosts, resultCostsSize));
+
 	// cudaMemcpy(gpuPointArray, result, pointArraySize, cudaMemcpyHostToDevice);
 
 	// Setup GPU random generator
@@ -482,7 +525,7 @@ extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, p
 	
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuPointArray, gpuRS, gpuAlgoCFG, gpuSRF, gpuGpuConfig, d_rngStates);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuAlgoCFG, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -491,6 +534,7 @@ extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, p
 
 	// copy back results from gpu to cpu
 	checkCudaErrors(cudaMemcpy(outPointArray, gpuPointArray, pointArraySize, cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(outResultCosts, gpuResultCosts, resultCostsSize, cudaMemcpyDeviceToHost));
 
 	// Free all allocated GPU memory
 	cudaFree(gpuRS);
@@ -499,7 +543,18 @@ extern "C" __declspec(dllexport) point* KernelWrapper(relationshipStruct *rss, p
 	cudaFree(gpuGpuConfig);
 	cudaFree(gpuPointArray);
 
-	return outPointArray;
+	// Construct return result
+	result *resultPointer = (result*)malloc(sizeof(result) * gpuCfg->gridxDim);
+	for (int i = 0; i < gpuCfg->gridxDim; i++)
+	{
+		resultPointer[i].costs.FocalPointCosts = outResultCosts[i].FocalPointCosts;
+		resultPointer[i].costs.PairWiseCosts = outResultCosts[i].PairWiseCosts;
+		resultPointer[i].costs.SymmetryCosts = outResultCosts[i].SymmetryCosts;
+		resultPointer[i].costs.totalCosts = outResultCosts[i].totalCosts;
+		resultPointer[i].costs.VisualBalanceCosts = outResultCosts[i].VisualBalanceCosts;
+		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
+	}
+	return resultPointer;
 }
 
 void basicCudaDeviceInformation(int argc, char **argv) {
@@ -579,20 +634,20 @@ int main(int argc, char **argv)
 
 	gpuConfig gpuCfg;
 
-	gpuCfg.gridxDim = 1;
+	gpuCfg.gridxDim = 10;
 	gpuCfg.gridyDim = 0;
 	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 1000;
+	gpuCfg.iterations = 10;
 
 	// Point test code:
 
-	point *result = KernelWrapper(rss, cfg, &srf, &gpuCfg);
+	result *result = KernelWrapper(rss, cfg, &srf, &gpuCfg);
 
-	for (int i = 0; i < srf.nObjs * gpuCfg.gridxDim; i++)
+	for (int i = 0; i < gpuCfg.gridxDim; i++)
 	{
-		printf("Values of result index %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", i, result[i].x, result[i].y, result[i].z, result[i].rotX, result[i].rotY, result[i].rotZ);
+		printf("Values of result index %d. Total costs: %f\n", i, result[i].costs.totalCosts);
 	}
 
  	return EXIT_SUCCESS;
