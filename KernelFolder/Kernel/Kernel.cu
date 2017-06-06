@@ -38,6 +38,24 @@
 #define S_SIGMA_P (0.8)
 #define S_SIGMA_T (15.0 / 90.0 * PI)
 
+
+
+struct vertex
+{
+	double x;
+	double y;
+	double z;
+};
+
+struct rectangle
+{
+	int point1Index;
+	int point2Index;
+	int point3Index;
+	int point4Index;
+	int SourceIndex;
+};
+
 struct positionAndRotation
 {
 	double x;
@@ -70,12 +88,15 @@ struct Surface
 {
 	int nObjs;
 	int nRelationships;
+	int nClearances;
 
 	// Weights
 	float WeightFocalPoint;
 	float WeightPairWise;
 	float WeightVisualBalance;
 	float WeightSymmetry;
+	float WeightClearance;
+	float WeightSurfaceArea;
 
 	// Centroid
 	double centroidX;
@@ -109,6 +130,8 @@ struct resultCosts
 	float VisualBalanceCosts;
 	float FocalPointCosts;
 	float SymmetryCosts;
+	float ClearanceCosts;
+	float SurfaceAreaCosts;
 };
 
 struct result {
@@ -237,13 +260,178 @@ __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 	return sum;
 }
 
-__device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs)
+
+__device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, vertex rect2Min, vertex rect2Max) {
+	// printf("Clearance rectangle 1: Min X: %f Y: %f Max X: %f Y: %f\n", rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+	// printf("Clearance rectangle 2: Min X: %f Y: %f Max X: %f Y: %f\n", rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
+	// for each two rectangles, find out their intersection. Increase the error using the area
+	float x5 = fmaxf(rect1Min.x, rect2Min.x);
+	float y5 = fmaxf(rect1Min.y, rect2Min.y);
+	float x6 = fminf(rect1Max.x, rect2Max.x);
+	float y6 = fminf(rect1Max.y, rect2Max.y);
+
+	// Check if proper rectangle, if so it is an intersection.
+	if (x5 >= x6 || y5 >= y6)
+		return 0.0f;
+
+	// printf("Intersection rectangle: Min X: %f Y: %f Max X: %f Y: %f\n", x5, y5, x6, y6);
+
+	// Calculate area and add to error
+	float area = (x6 - x5) * (y6 - y5);
+	// printf("Area intersection rectangle: %f\n", area);
+	return area;
+}
+
+__device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, vertex *complementRectangle1, vertex *complementRectangle2, vertex *complementRectangle3, vertex *complementRectangle4) {
+	// 0 is min value, 1 is max value
+	complementRectangle1[0].x = -DBL_MAX;
+	complementRectangle1[0].y = -DBL_MAX;
+	complementRectangle1[1].x = DBL_MAX;
+	complementRectangle1[1].y = srfRectMin.y;
+
+	complementRectangle2[0].x = -DBL_MAX;
+	complementRectangle2[0].y = srfRectMin.y;
+	complementRectangle2[1].x = srfRectMin.x;
+	complementRectangle2[1].y = srfRectMax.y;
+
+	complementRectangle3[0].x = -DBL_MAX;
+	complementRectangle3[0].y = srfRectMax.y;
+	complementRectangle3[1].x = DBL_MAX;
+	complementRectangle3[1].y = DBL_MAX;
+
+	complementRectangle4[0].x = srfRectMax.x;
+	complementRectangle4[0].y = srfRectMin.y;
+	complementRectangle4[1].x = DBL_MAX;
+	complementRectangle4[1].y = srfRectMax.y;
+}
+
+__device__ vertex minValue(vertex *vertices, int startIndexVertices) {
+	vertex rect1;
+	rect1.x = DBL_MAX;
+	rect1.y = DBL_MAX;
+	rect1.z = 0;
+
+	rect1.x = (rect1.x > vertices[startIndexVertices].x) ? vertices[startIndexVertices].x : rect1.x;
+	rect1.x = (rect1.x > vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices + 1].x : rect1.x;
+	rect1.x = (rect1.x > vertices[startIndexVertices + 2].x) ? vertices[startIndexVertices + 2].x : rect1.x;
+	rect1.x = (rect1.x > vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 3].x : rect1.x;
+
+	rect1.y = (rect1.y > vertices[startIndexVertices].y) ? vertices[startIndexVertices].y : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices + 1].y : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices + 2].y) ? vertices[startIndexVertices + 2].y : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 3].y : rect1.y;
+	return rect1;
+}
+
+__device__ vertex maxValue(vertex *vertices, int startIndexVertices) {
+	vertex rect1;
+	rect1.x = -DBL_MAX;
+	rect1.y = -DBL_MAX;
+	rect1.z = 0;
+
+	rect1.x = (rect1.x < vertices[startIndexVertices].x) ? vertices[startIndexVertices].x : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices + 1].x : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices + 2].x) ? vertices[startIndexVertices + 2].x : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 3].x : rect1.x;
+
+	rect1.y = (rect1.y < vertices[startIndexVertices].y) ? vertices[startIndexVertices].y : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices + 1].y : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices + 2].y) ? vertices[startIndexVertices + 2].y : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 3].y : rect1.y;
+	return rect1;
+}
+
+// Clearance costs is calculated by determining any intersections between clearances and offlimits. Clearances may overlap with other clearances
+__device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits)
+{
+	//printf("Clearance cost calculation\n");
+	float error = 0.0f;
+	for (int i = 0; i < srf->nClearances; i++) {
+		for (int j = 0; j < srf->nObjs; j++) {
+			// Determine max and min vectors of clearance rectangles
+			// rectangle #1
+			vertex rect1Min = minValue(vertices, clearances[i].point1Index);
+			vertex rect1Max = maxValue(vertices, clearances[i].point1Index);
+
+			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+
+			// rectangle #2
+			vertex rect2Min = minValue(vertices, offlimits[j].point1Index);
+			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index);
+
+			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
+
+			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
+			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
+			error += area;
+		}
+	}
+	//printf("Clearance costs error: %f\n", error);
+	return error;
+}
+
+// Both clearance as offlimits may not lie outside of the surface area
+__device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle) {
+	//printf("Surface cost calculation\n");
+
+	float error = 0.0f;
+	// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
+	vertex complementRectangle1[2];
+	vertex complementRectangle2[2];
+	vertex complementRectangle3[2];
+	vertex complementRectangle4[2];
+
+	// Figure out min and max vectors of surface rectangle
+	vertex srfRect1Min = minValue(surfaceRectangle, 0);
+	vertex srfRect1Max = maxValue(surfaceRectangle, 0);
+
+	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle1, complementRectangle2, complementRectangle3, complementRectangle4);
+
+	for (int i = 0; i < srf->nClearances; i++) {
+		// Determine max and min vectors of clearance rectangles
+		// rectangle #1
+		vertex rect1Min = minValue(vertices, clearances[i].point1Index);
+		vertex rect1Max = maxValue(vertices, clearances[i].point1Index);
+
+		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+
+
+		// printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+	}
+
+	for (int j = 0; j < srf->nObjs; j++) {
+		// Determine max and min vectors of clearance rectangles
+		// rectangle #1
+		vertex rect1Min = minValue(vertices, offlimits[j].point1Index);
+		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index);
+
+		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+	}
+	//printf("Surface area costs error: %f\n", error);
+	return error;
+}
+
+__device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
 	costs->PairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
 	costs->VisualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
 	costs->FocalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
 	costs->SymmetryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
-	costs->totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts;
+	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
+	//printf("Clearance costs with weight %f\n", clearanceCosts);
+	costs->ClearanceCosts = clearanceCosts;
+	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
+	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
+	costs->SurfaceAreaCosts = surfaceAreaCosts;
+	costs->totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
 }
 
 __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo) 
@@ -252,6 +440,8 @@ __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo)
 	copyTo->VisualBalanceCosts = copyFrom->VisualBalanceCosts;
 	copyTo->FocalPointCosts = copyFrom->FocalPointCosts;
 	copyTo->SymmetryCosts = copyFrom->SymmetryCosts;
+	copyTo->ClearanceCosts = copyFrom->ClearanceCosts;
+	copyTo->SurfaceAreaCosts = copyFrom->SurfaceAreaCosts;
 	copyTo->totalCosts = copyFrom->totalCosts;
 }
 
@@ -368,12 +558,11 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 // rs is an array with the length equal to the amount of relationships
 // cfg is an array with the length equal to the amount of objects
 // Surface is a basic struct
-__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, positionAndRotation* cfg, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
+__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
 {
 //    printf("current block [%d, %d]:\n",\
 //            blockIdx.y*gridDim.x+blockIdx.x,\
 //            threadIdx.z*blockDim.x*blockDim.y+threadIdx.y*blockDim.x+threadIdx.x);
-
 	// Calculate current tid
 	unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	// Retrieve local state from rng states
@@ -386,7 +575,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		cfgCurrent[i] = cfg[i];
 	}
 	resultCosts* currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
-	Costs(srf, currentCosts, cfgCurrent, rs);
+	Costs(srf, currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
 	
 	positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	for (int i = 0; i < srf->nObjs; i++)
@@ -408,7 +597,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		}
 		// cfgStar contains an array with translated objects
 		propose(srf, cfgStar, rngStates, tid);
-		Costs(srf, starCosts, cfgStar, rs);
+		Costs(srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
 		//printf("Cost star configuration: %f\n", costStar);
 		//printf("Cost best configuration: %f\n", costBest);
 		// star has a better cost function than best cost, star is the new best
@@ -465,6 +654,8 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts->VisualBalanceCosts;
 	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts->FocalPointCosts;
 	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts->SymmetryCosts;
+	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts->SurfaceAreaCosts;
+	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts->ClearanceCosts;
 
 	free(cfgCurrent);
 	free(currentCosts);
@@ -472,7 +663,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	free(bestCosts);
 }
 
-extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, positionAndRotation* cfg, Surface *srf, gpuConfig *gpuCfg)
+extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
 {
 	// Create pointer for on gpu
 	// Determine memory size of object to transfer
@@ -488,6 +679,26 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	int algoCFGSize = sizeof(positionAndRotation) * srf->nObjs;
 	checkCudaErrors(cudaMalloc(&gpuAlgoCFG, algoCFGSize));
 	checkCudaErrors(cudaMemcpy(gpuAlgoCFG, cfg, algoCFGSize, cudaMemcpyHostToDevice));
+
+	rectangle *gpuClearances;
+	int clearancesSize = sizeof(rectangle) * srf->nClearances;
+	checkCudaErrors(cudaMalloc(&gpuClearances, clearancesSize));
+	checkCudaErrors(cudaMemcpy(gpuClearances, clearances, clearancesSize, cudaMemcpyHostToDevice));
+
+	rectangle *gpuOfflimits;
+	int offlimitsSize = sizeof(rectangle) * srf->nObjs;
+	checkCudaErrors(cudaMalloc(&gpuOfflimits, offlimitsSize));
+	checkCudaErrors(cudaMemcpy(gpuOfflimits, offlimits, offlimitsSize, cudaMemcpyHostToDevice));
+
+	vertex *gpuVertices;
+	int verticesSize = sizeof(vertex) * (srf->nClearances * 4 + srf->nObjs * 4);
+	checkCudaErrors(cudaMalloc(&gpuVertices, verticesSize));
+	checkCudaErrors(cudaMemcpy(gpuVertices, vertices, verticesSize, cudaMemcpyHostToDevice));
+
+	vertex *gpuSurfaceRectangle;
+	int surfaceRectangleSize = sizeof(vertex) * 4;
+	checkCudaErrors(cudaMalloc(&gpuSurfaceRectangle, surfaceRectangleSize));
+	checkCudaErrors(cudaMemcpy(gpuSurfaceRectangle, surfaceRectangle, surfaceRectangleSize, cudaMemcpyHostToDevice));
 
 	Surface *gpuSRF;
 	int srfSize = sizeof(Surface);
@@ -525,7 +736,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuAlgoCFG, gpuSRF, gpuGpuConfig, d_rngStates);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuAlgoCFG, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -580,18 +791,133 @@ int main(int argc, char **argv)
 
 	const int N = 2;
 	const int NRel = 1;
+	const int NClearances = 2;
 	Surface srf;
 	srf.nObjs = N;
 	srf.nRelationships = NRel;
+	srf.nClearances = NClearances;
 	srf.WeightFocalPoint = -2.0f;
 	srf.WeightPairWise = -2.0f;
 	srf.WeightVisualBalance = 1.5f;
 	srf.WeightSymmetry = -2.0;
+	srf.WeightClearance = -2.0;
+	srf.WeightSurfaceArea = -2.0;
 	srf.centroidX = 0.0;
 	srf.centroidY = 0.0;
 	srf.focalX = 5.0;
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
+
+	vertex surfaceRectangle[4];
+	surfaceRectangle[0].x = 10;
+	surfaceRectangle[0].y = 10;
+	surfaceRectangle[0].z = 0;
+
+	surfaceRectangle[1].x = 10;
+	surfaceRectangle[1].y = 0;
+	surfaceRectangle[1].z = 0;
+
+	surfaceRectangle[2].x = 0;
+	surfaceRectangle[2].y = 0;
+	surfaceRectangle[2].z = 0;
+
+	surfaceRectangle[3].x = 0;
+	surfaceRectangle[3].y = 10;
+	surfaceRectangle[3].z = 0;
+
+
+	vertex vtx[16];
+	// Clearance shapes
+	vtx[0].x = 2;
+	vtx[0].y = 2;
+	vtx[0].z = 0;
+
+	vtx[1].x = 2;
+	vtx[1].y = 0;
+	vtx[1].z = 0;
+
+	vtx[2].x = 0;
+	vtx[2].y = 0;
+	vtx[2].z = 0;
+
+	vtx[3].x = 0;
+	vtx[3].y = 2;
+	vtx[3].z = 0;
+
+	vtx[4].x = 3;
+	vtx[4].y = 2;
+	vtx[4].z = 0;
+
+	vtx[5].x = 3;
+	vtx[5].y = 0;
+	vtx[5].z = 0;
+
+	vtx[6].x = 1;
+	vtx[6].y = 0;
+	vtx[6].z = 0;
+
+	vtx[7].x = 1;
+	vtx[7].y = 2;
+	vtx[7].z = 0;
+
+	// Off limits
+	vtx[8].x = 2;
+	vtx[8].y = 2;
+	vtx[8].z = 0;
+
+	vtx[9].x = 2;
+	vtx[9].y = 0;
+	vtx[9].z = 0;
+
+	vtx[10].x = 0;
+	vtx[10].y = 0;
+	vtx[10].z = 0;
+
+	vtx[11].x = 0;
+	vtx[11].y = 2;
+	vtx[11].z = 0;
+
+	vtx[12].x = 3;
+	vtx[12].y = 2;
+	vtx[12].z = 0;
+
+	vtx[13].x = 3;
+	vtx[13].y = 0;
+	vtx[13].z = 0;
+
+	vtx[14].x = 1;
+	vtx[14].y = 0;
+	vtx[14].z = 0;
+
+	vtx[15].x = 1;
+	vtx[15].y = 2;
+	vtx[15].z = 0;
+
+	rectangle clearances[NClearances];
+	clearances[0].point1Index = 0;
+	clearances[0].point2Index = 1;
+	clearances[0].point3Index = 2;
+	clearances[0].point4Index = 3;
+	clearances[0].SourceIndex = 0;
+
+	clearances[1].point1Index = 4;
+	clearances[1].point2Index = 5;
+	clearances[1].point3Index = 6;
+	clearances[1].point4Index = 7;
+	clearances[1].SourceIndex = 1;
+
+	rectangle offlimits[N];
+	offlimits[0].point1Index = 8;
+	offlimits[0].point2Index = 9;
+	offlimits[0].point3Index = 10;
+	offlimits[0].point4Index = 11;
+	offlimits[0].SourceIndex = 0;
+
+	offlimits[1].point1Index = 12;
+	offlimits[1].point2Index = 13;
+	offlimits[1].point3Index = 14;
+	offlimits[1].point4Index = 15;
+	offlimits[1].SourceIndex = 1;
 
 	positionAndRotation cfg[N];
 	for (int i = 0; i < N; i++) {
@@ -634,16 +960,16 @@ int main(int argc, char **argv)
 
 	gpuConfig gpuCfg;
 
-	gpuCfg.gridxDim = 10;
+	gpuCfg.gridxDim = 1;
 	gpuCfg.gridyDim = 0;
 	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 10;
+	gpuCfg.iterations = 5;
 
 	// Point test code:
 
-	result *result = KernelWrapper(rss, cfg, &srf, &gpuCfg);
+	result *result = KernelWrapper(rss, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, &gpuCfg);
 
 	for (int i = 0; i < gpuCfg.gridxDim; i++)
 	{
