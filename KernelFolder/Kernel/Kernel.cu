@@ -305,39 +305,40 @@ __device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, 
 	complementRectangle4[1].y = srfRectMax.y;
 }
 
-__device__ vertex minValue(vertex *vertices, int startIndexVertices) {
+__device__ vertex minValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
 	vertex rect1;
 	rect1.x = DBL_MAX;
 	rect1.y = DBL_MAX;
 	rect1.z = 0;
+	rect1.x = (rect1.x > vertices[startIndexVertices].x + xtranslation) ? vertices[startIndexVertices].x : rect1.x;
+	rect1.x = (rect1.x > vertices[startIndexVertices + 1].x + xtranslation) ? vertices[startIndexVertices + 1].x + xtranslation : rect1.x;
+	rect1.x = (rect1.x > vertices[startIndexVertices + 2].x + xtranslation) ? vertices[startIndexVertices + 2].x + xtranslation : rect1.x;
+	rect1.x = (rect1.x > vertices[startIndexVertices + 3].x + xtranslation) ? vertices[startIndexVertices + 3].x + xtranslation : rect1.x;
 
-	rect1.x = (rect1.x > vertices[startIndexVertices].x) ? vertices[startIndexVertices].x : rect1.x;
-	rect1.x = (rect1.x > vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices + 1].x : rect1.x;
-	rect1.x = (rect1.x > vertices[startIndexVertices + 2].x) ? vertices[startIndexVertices + 2].x : rect1.x;
-	rect1.x = (rect1.x > vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 3].x : rect1.x;
-
-	rect1.y = (rect1.y > vertices[startIndexVertices].y) ? vertices[startIndexVertices].y : rect1.y;
-	rect1.y = (rect1.y > vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices + 1].y : rect1.y;
-	rect1.y = (rect1.y > vertices[startIndexVertices + 2].y) ? vertices[startIndexVertices + 2].y : rect1.y;
-	rect1.y = (rect1.y > vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 3].y : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices].y + ytranslation) ? vertices[startIndexVertices].y + ytranslation : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices + 1].y + ytranslation) ? vertices[startIndexVertices + 1].y + ytranslation : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices + 2].y + ytranslation) ? vertices[startIndexVertices + 2].y + ytranslation : rect1.y;
+	rect1.y = (rect1.y > vertices[startIndexVertices + 3].y + ytranslation) ? vertices[startIndexVertices + 3].y + ytranslation : rect1.y;
+	//printf("Min value vector after translation: X: %f Y: %f\n", rect1.x, rect1.y);
 	return rect1;
 }
 
-__device__ vertex maxValue(vertex *vertices, int startIndexVertices) {
+__device__ vertex maxValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
 	vertex rect1;
 	rect1.x = -DBL_MAX;
 	rect1.y = -DBL_MAX;
 	rect1.z = 0;
 
-	rect1.x = (rect1.x < vertices[startIndexVertices].x) ? vertices[startIndexVertices].x : rect1.x;
-	rect1.x = (rect1.x < vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices + 1].x : rect1.x;
-	rect1.x = (rect1.x < vertices[startIndexVertices + 2].x) ? vertices[startIndexVertices + 2].x : rect1.x;
-	rect1.x = (rect1.x < vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 3].x : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices].x + xtranslation) ? vertices[startIndexVertices].x + xtranslation : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices + 1].x + xtranslation) ? vertices[startIndexVertices + 1].x + xtranslation : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices + 2].x + xtranslation) ? vertices[startIndexVertices + 2].x + xtranslation : rect1.x;
+	rect1.x = (rect1.x < vertices[startIndexVertices + 3].x + xtranslation) ? vertices[startIndexVertices + 3].x + xtranslation : rect1.x;
 
-	rect1.y = (rect1.y < vertices[startIndexVertices].y) ? vertices[startIndexVertices].y : rect1.y;
-	rect1.y = (rect1.y < vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices + 1].y : rect1.y;
-	rect1.y = (rect1.y < vertices[startIndexVertices + 2].y) ? vertices[startIndexVertices + 2].y : rect1.y;
-	rect1.y = (rect1.y < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 3].y : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices].y + ytranslation) ? vertices[startIndexVertices].y + ytranslation : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices + 1].y + ytranslation) ? vertices[startIndexVertices + 1].y + ytranslation : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices + 2].y + ytranslation) ? vertices[startIndexVertices + 2].y + ytranslation : rect1.y;
+	rect1.y = (rect1.y < vertices[startIndexVertices + 3].y + ytranslation) ? vertices[startIndexVertices + 3].y + ytranslation : rect1.y;
+	//printf("Max value vector after translation: X: %f Y: %f\n", rect1.x, rect1.y);
 	return rect1;
 }
 
@@ -350,14 +351,18 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 		for (int j = 0; j < srf->nObjs; j++) {
 			// Determine max and min vectors of clearance rectangles
 			// rectangle #1
-			vertex rect1Min = minValue(vertices, clearances[i].point1Index);
-			vertex rect1Max = maxValue(vertices, clearances[i].point1Index);
+			//printf("Clearance\n");
+			//printf("Translation: X: %f Y: %f\n", cfg[i].x, cfg[i].y);
+			vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
+			vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
 
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 
 			// rectangle #2
-			vertex rect2Min = minValue(vertices, offlimits[j].point1Index);
-			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index);
+			//printf("Off limits\n");
+			//printf("Translation: X: %f Y: %f\n", cfg[j].x, cfg[j].y);
+			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
+			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
 
@@ -382,16 +387,16 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 	vertex complementRectangle4[2];
 
 	// Figure out min and max vectors of surface rectangle
-	vertex srfRect1Min = minValue(surfaceRectangle, 0);
-	vertex srfRect1Max = maxValue(surfaceRectangle, 0);
+	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
+	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
 
 	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle1, complementRectangle2, complementRectangle3, complementRectangle4);
 
 	for (int i = 0; i < srf->nClearances; i++) {
 		// Determine max and min vectors of clearance rectangles
 		// rectangle #1
-		vertex rect1Min = minValue(vertices, clearances[i].point1Index);
-		vertex rect1Max = maxValue(vertices, clearances[i].point1Index);
+		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
+		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 
@@ -406,8 +411,8 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 	for (int j = 0; j < srf->nObjs; j++) {
 		// Determine max and min vectors of clearance rectangles
 		// rectangle #1
-		vertex rect1Min = minValue(vertices, offlimits[j].point1Index);
-		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index);
+		vertex rect1Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
+		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
@@ -440,7 +445,9 @@ __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo)
 	copyTo->VisualBalanceCosts = copyFrom->VisualBalanceCosts;
 	copyTo->FocalPointCosts = copyFrom->FocalPointCosts;
 	copyTo->SymmetryCosts = copyFrom->SymmetryCosts;
+	//printf("Copying Clearance costs with weight %f\n", copyFrom->ClearanceCosts);
 	copyTo->ClearanceCosts = copyFrom->ClearanceCosts;
+	//printf("Copying Surface area costs with weight %f\n", copyFrom->SurfaceAreaCosts);
 	copyTo->SurfaceAreaCosts = copyFrom->SurfaceAreaCosts;
 	copyTo->totalCosts = copyFrom->totalCosts;
 }
@@ -654,7 +661,9 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts->VisualBalanceCosts;
 	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts->FocalPointCosts;
 	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts->SymmetryCosts;
+	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
 	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts->SurfaceAreaCosts;
+	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
 	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts->ClearanceCosts;
 
 	free(cfgCurrent);
@@ -763,6 +772,8 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 		resultPointer[i].costs.SymmetryCosts = outResultCosts[i].SymmetryCosts;
 		resultPointer[i].costs.totalCosts = outResultCosts[i].totalCosts;
 		resultPointer[i].costs.VisualBalanceCosts = outResultCosts[i].VisualBalanceCosts;
+		resultPointer[i].costs.ClearanceCosts = outResultCosts[i].ClearanceCosts;
+		resultPointer[i].costs.SurfaceAreaCosts = outResultCosts[i].SurfaceAreaCosts;
 		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
 	}
 	return resultPointer;
@@ -921,12 +932,12 @@ int main(int argc, char **argv)
 
 	positionAndRotation cfg[N];
 	for (int i = 0; i < N; i++) {
-		cfg[i].x = 2.0;
-		cfg[i].y = 3.0;
-		cfg[i].z = 4.0;
-		cfg[i].rotX = 5.0;
-		cfg[i].rotY = 6.0;
-		cfg[i].rotZ = 7.0;
+		cfg[i].x = i * 2.0;
+		cfg[i].y = i * 2.0;
+		cfg[i].z = 0.0;
+		cfg[i].rotX = 0.0;
+		cfg[i].rotY = 0.0;
+		cfg[i].rotZ = 0.0;
 		cfg[i].frozen = false;
 		cfg[i].length = 1.0;
 		cfg[i].width = 1.0;
