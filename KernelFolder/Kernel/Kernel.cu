@@ -177,7 +177,7 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 	}
 
 	// Distance between all summed areas and points divided by the areas and the room's centroid
-	return Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2);
+	return -1.0 * Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2);
 }
 
 __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
@@ -191,17 +191,14 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 		if (distance < rs[i].TargetRange.targetRangeStart)
 		{
 			double fraction = distance / rs[i].TargetRange.targetRangeStart;
-			result += (fraction * fraction);
+			result -= (fraction * fraction);
 		}
 		else if (distance > rs[i].TargetRange.targetRangeEnd) 
 		{
 			double fraction = rs[i].TargetRange.targetRangeEnd / distance;
-			result += (fraction * fraction);
+			result -= (fraction * fraction);
 		}
-		else
-		{
-			result += 1;
-		}
+		// Else don't do anything as 0 indicates a perfect solution
 	}
 	return result;
 }
@@ -212,12 +209,12 @@ __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
 	for (int i = 0; i < srf->nObjs; i++)
 	{
 		float phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
-		// Old implementation of grouping, all objects that belong to the category seat are used in the focal point calculation
+		// Old implementation of grouping, all objects that belong to the seat category are used in the focal point calculation
 		// For now we default to all objects, focal point grouping will come later
 		//int s_i = s(r.c[i]);
 
 		// sum += s_i * cos(phi_fi);
-		sum += cos(phi_fi);
+		sum -= cos(phi_fi);
 	}
 
 	return sum;
@@ -254,7 +251,7 @@ __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 			maxVal = fmaxf(maxVal, val);
 		}
 
-		sum += maxVal;
+		sum -= maxVal;
 	}
 
 	return sum;
@@ -368,7 +365,7 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 
 			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
 			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-			error += area;
+			error -= area;
 		}
 	}
 	//printf("Clearance costs error: %f\n", error);
@@ -402,23 +399,23 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 
 
 		// printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
 
 	for (int j = 0; j < srf->nObjs; j++) {
-		// Determine max and min vectors of clearance rectangles
+		// Determine max and min vectors of off limit rectangles
 		// rectangle #1
 		vertex rect1Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		error += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		error -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
 	//printf("Surface area costs error: %f\n", error);
 	return error;
