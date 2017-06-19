@@ -426,17 +426,33 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 
 __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
-	costs->PairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
-	costs->VisualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
-	costs->FocalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
-	costs->SymmetryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
+	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
+	costs->PairWiseCosts = pairWiseCosts;
+	printf("Pair wise costs with weight %f\n", pairWiseCosts);
+
+	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
+	costs->VisualBalanceCosts = visualBalanceCosts;
+	printf("Visual balance costs with weight %f\n", visualBalanceCosts);
+
+	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
+	costs->FocalPointCosts = focalPointCosts;
+	printf("Focal point costs with weight %f\n", focalPointCosts);
+
+	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
+	costs->SymmetryCosts = symmertryCosts;
+	printf("Symmertry costs with weight %f\n", symmertryCosts);
+
 	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
-	//printf("Clearance costs with weight %f\n", clearanceCosts);
+	printf("Clearance costs with weight %f\n", clearanceCosts);
 	costs->ClearanceCosts = clearanceCosts;
+
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
-	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
+	printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	costs->SurfaceAreaCosts = surfaceAreaCosts;
-	costs->totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
+
+	float totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
+	printf("Total costs %f\n", totalCosts);
+	costs->totalCosts = totalCosts;
 }
 
 __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo) 
@@ -462,41 +478,71 @@ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid
 	return (int)truncf(p_rand);
 }
 
-__device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState *rngStates, unsigned int tid)
+__device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
 {
+	/*for (int j = 0; j < srf->nObjs; j++)
+	{
+		printf("Star values inside proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
+	}*/
 	int p = generateRandomIntInRange(rngStates, tid, 2, 0);
-	//printf("Selected mode: %d\n", p);
+
+	// Determine width and length of surface rectangle
+	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
+	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
+	float width = srfRect1Max.x - srfRect1Min.x;
+	float height = srfRect1Max.y - srfRect1Min.y;
+	// Dividing the width by 2 makes sure that it stays withing a 95% percentile range that is usable, dividing it by 4 makes sure that it stretches the half of the length/width or lower (and that inside a 95% interval).
+	float stdXAxis = width / 4;
+	float stdYAxis = height / 4;
+
+	// printf("Selected mode: %d\n", p);
 	// Translate location using normal distribution
 	if (p == 0)
 	{
 		// randomly choose an object
-		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 
 		// Potential never ending loop when everything is frozen
 		while (cfgStar[obj].frozen)
-			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 
 		//printf("Selected object #: %d\n", obj);
 		float dx = curand_normal(&rngStates[tid]);
-		dx = dx * S_SIGMA_P;
+		dx = dx * stdXAxis;
 		//printf("dx: %f\n", dx);
 		float dy = curand_normal(&rngStates[tid]);
-		dy = dy * S_SIGMA_P;
-		//printf("dy: %f\n", dy);
-		//printf("Before translation: %f\n", cfgStar[obj].x);
-		//printf("Before translation: %f\n", cfgStar[obj].y);
-		cfgStar[obj].x += dx;
-		cfgStar[obj].y += dy;
-		//printf("After translation: %f\n", cfgStar[obj].x);
-		//printf("After translation: %f\n", cfgStar[obj].y);
+		dy = dy * stdYAxis;
+		// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
+
+		// When object exceeds surfacearea, snap it back.
+		if (cfgStar[obj].x + dx > srfRect1Max.x) {
+			cfgStar[obj].x = srfRect1Max.x;
+		}
+		else if (cfgStar[obj].x + dx < srfRect1Min.x) {
+			cfgStar[obj].x = srfRect1Min.x;
+		}
+		else {
+			cfgStar[obj].x += dx;
+		}
+		if (cfgStar[obj].y + dy > srfRect1Max.y) {
+			cfgStar[obj].y = srfRect1Max.y;
+		}
+		else if (cfgStar[obj].y + dy < srfRect1Min.y) {
+			cfgStar[obj].y = srfRect1Min.y;
+		}
+		else {
+			cfgStar[obj].y += dy;
+		}
+		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
 	// Translate rotation using normal distribution
 	else if (p == 1)
 	{
-		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 		while (cfgStar[obj].frozen)
-			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 		// printf("Selected object #: %d\n", obj);
+		// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 		float dRot = curand_normal(&rngStates[tid]);
 		dRot = dRot * S_SIGMA_T;
 		// printf("dRot: %f\n", dRot);
@@ -508,6 +554,7 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 			cfgStar[obj].rotY += 2 * PI;
 		else if (cfgStar[obj].rotY > 2 * PI)
 			cfgStar[obj].rotY -= 2 * PI;
+		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
 	// Swap two objects for both location and rotation
 	else
@@ -516,15 +563,18 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 			return;
 		}
 		// This can result in the same object, chance becomes increasingly smaller given more objects
-		int obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+		int obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 		while (cfgStar[obj1].frozen)
-			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 
-		int obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
+		int obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 		while (cfgStar[obj2].frozen)
-			obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs, 0);
-		// printf("Selected object #: %d\n", obj1);
-		// printf("Selected object #: %d\n", obj2);
+			obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
+		// printf("First selected object #: %d\n", obj1);
+		// printf("Second selected object #: %d\n", obj2);
+
+		// printf("Values, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
+		// printf("Values of, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
 		// Temporarily store cfgStar[obj1] values
 		float x = cfgStar[obj1].x;
@@ -533,6 +583,8 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 		float rotX = cfgStar[obj1].rotX;
 		float rotY = cfgStar[obj1].rotY;
 		float rotZ = cfgStar[obj1].rotZ;
+		// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
+		// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
 		// Move values of obj2 to obj1
 		cfgStar[obj1].x = cfgStar[obj2].x;
@@ -541,6 +593,8 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 		cfgStar[obj1].rotX = cfgStar[obj2].rotX;
 		cfgStar[obj1].rotY = cfgStar[obj2].rotY;
 		cfgStar[obj1].rotZ = cfgStar[obj2].rotZ;
+		// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
+		// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
 		// Move stored values of obj1 to obj2
 		cfgStar[obj2].x = x;
@@ -549,6 +603,8 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, curandState 
 		cfgStar[obj2].rotX = rotX;
 		cfgStar[obj2].rotY = rotY;
 		cfgStar[obj2].rotZ = rotZ;
+		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
+		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 	}
 }
 
@@ -559,6 +615,22 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 	float randomNumber = curand_uniform(&rngStates[tid]);
 	//printf("Random number: %f\n", randomNumber);
 	return  randomNumber < fminf(1.0f, (float) exp(-BETA * (costStar - costCur)));
+}
+
+__device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surface* srf) 
+{
+	for (unsigned int i = 0; i < srf->nObjs; i++)
+	{
+		cfg1[i].x = cfg2[i].x;
+		cfg1[i].y = cfg2[i].y;
+		cfg1[i].z = cfg2[i].z;
+		cfg1[i].rotX = cfg2[i].rotX;
+		cfg1[i].rotY = cfg2[i].rotY;
+		cfg1[i].rotZ = cfg2[i].rotZ;
+		cfg1[i].frozen = cfg2[i].frozen;
+		cfg1[i].length = cfg2[i].length;
+		cfg1[i].width = cfg2[i].width;
+	}
 }
 
 // result is a [,] array with 1 dimension equal to the amount of blocks used and the other dimension equal to the amount of objects
@@ -577,18 +649,12 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	
 	// Initialize current configuration
 	positionAndRotation* cfgCurrent = (positionAndRotation*) malloc(srf->nObjs * sizeof(positionAndRotation));
-	for (int i = 0; i < srf->nObjs; i++)
-	{
-		cfgCurrent[i] = cfg[i];
-	}
+	Copy(cfgCurrent, cfg, srf);
 	resultCosts* currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
 	Costs(srf, currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
 	
 	positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-	for (int i = 0; i < srf->nObjs; i++)
-	{
-		cfgBest[i] = cfgCurrent[i];
-	}
+	Copy(cfgBest, cfgCurrent, srf);
 	resultCosts* bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
 	CopyCosts(currentCosts, bestCosts);
 	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
@@ -598,25 +664,32 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		// Create cfg Star and initialize it to cfgcurrent that will have a proposition done to it.
 		positionAndRotation* cfgStar = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 		resultCosts* starCosts = (resultCosts*)malloc(sizeof(resultCosts));
+		/*for (int j = 0; j < srf->nObjs; j++)
+		{
+			printf("Current values before copy of result jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
+		}*/
+		Copy(cfgStar, cfgCurrent, srf);
+		/*for (int j = 0; j < srf->nObjs; j++)
+		{
+			printf("Star values after Copy, before proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
+		}*/
+		// cfgStar contains an array with translated objects
+		propose(srf, cfgStar, surfaceRectangle, rngStates, tid);
 		for (int j = 0; j < srf->nObjs; j++)
 		{
-			cfgStar[j] = cfgCurrent[j];
+			printf("Star values after proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 		}
-		// cfgStar contains an array with translated objects
-		propose(srf, cfgStar, rngStates, tid);
+
 		Costs(srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
-		//printf("Cost star configuration: %f\n", costStar);
-		//printf("Cost best configuration: %f\n", costBest);
+		printf("Cost star configuration: %f\n", starCosts->totalCosts);
+		printf("Cost best configuration: %f\n", bestCosts->totalCosts);
 		// star has a better cost function than best cost, star is the new best
 		if (starCosts->totalCosts < bestCosts->totalCosts)
 		{
-			//printf("New best %f\n", costBest);
+			//printf("New best %f\n", bestCosts->totalCosts);
 
 			// Copy star into best for storage
-			for (int j = 0; j < srf->nObjs; j++)
-			{
-				cfgBest[j] = cfgStar[j];
-			}
+			Copy(cfgBest, cfgStar, srf);
 			CopyCosts(starCosts, bestCosts);
 			//printf("Threadblock: %d, New costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 		}
@@ -627,14 +700,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 			// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
 			//printf("Star accepted as new current.\n");
 			// Copy star into current
-			for (int j = 0; j < srf->nObjs; j++)
-			{
-				//printf("Old current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
-				cfgCurrent[j] = cfgStar[j];
-				//printf("Star values of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
-				//printf("New current of result jndex %d. X: %f Y: %f Z: %f rotX: %f rotY: %f rotZ: %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
-				
-			}
+			Copy(cfgCurrent, cfgStar, srf);
 			CopyCosts(starCosts, currentCosts);
 		}
 		free(cfgStar);
@@ -976,15 +1042,26 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 5;
+	gpuCfg.iterations = 200;
 
 	// Point test code:
 
 	result *result = KernelWrapper(rss, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, &gpuCfg);
-
+	printf("Results:\n");
 	for (int i = 0; i < gpuCfg.gridxDim; i++)
 	{
-		printf("Values of result index %d. Total costs: %f\n", i, result[i].costs.totalCosts);
+		printf("Result %d\n", i);
+		for (int j = 0; j < srf.nObjs; j++) {
+			printf("Point [%d] X,Y,Z: %f, %f, %f	Rotation: %f, %f, %f\n", 
+				j,
+				result[i].points[j].x, 
+				result[i].points[j].y, 
+				result[i].points[j].z, 
+				result[i].points[j].rotX, 
+				result[i].points[j].rotY,
+				result[i].points[j].rotZ);
+		}
+		
 	}
 
  	return EXIT_SUCCESS;

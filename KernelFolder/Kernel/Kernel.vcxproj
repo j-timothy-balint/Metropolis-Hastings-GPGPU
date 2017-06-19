@@ -58,7 +58,10 @@
     <OutDir>../../bin/win64/$(Configuration)/</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <TargetExt>.dll</TargetExt>
+    <TargetExt>.exe</TargetExt>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <TargetExt />
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
