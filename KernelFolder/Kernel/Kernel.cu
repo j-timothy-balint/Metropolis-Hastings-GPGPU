@@ -425,30 +425,30 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 {
 	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
 	costs->PairWiseCosts = pairWiseCosts;
-	printf("Pair wise costs with weight %f\n", pairWiseCosts);
+	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 
 	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
 	costs->VisualBalanceCosts = visualBalanceCosts;
-	printf("Visual balance costs with weight %f\n", visualBalanceCosts);
+	// printf("Visual balance costs with weight %f\n", visualBalanceCosts);
 
 	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
 	costs->FocalPointCosts = focalPointCosts;
-	printf("Focal point costs with weight %f\n", focalPointCosts);
+	// printf("Focal point costs with weight %f\n", focalPointCosts);
 
 	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
 	costs->SymmetryCosts = symmertryCosts;
-	printf("Symmertry costs with weight %f\n", symmertryCosts);
+	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
 	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
-	printf("Clearance costs with weight %f\n", clearanceCosts);
+	// printf("Clearance costs with weight %f\n", clearanceCosts);
 	costs->ClearanceCosts = clearanceCosts;
 
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
-	printf("Surface area costs with weight %f\n", surfaceAreaCosts);
+	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	costs->SurfaceAreaCosts = surfaceAreaCosts;
 
 	float totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
-	printf("Total costs %f\n", totalCosts);
+	// printf("Total costs %f\n", totalCosts);
 	costs->totalCosts = totalCosts;
 }
 
@@ -672,14 +672,14 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		}*/
 		// cfgStar contains an array with translated objects
 		propose(srf, cfgStar, surfaceRectangle, rngStates, tid);
-		for (int j = 0; j < srf->nObjs; j++)
+		/* for (int j = 0; j < srf->nObjs; j++)
 		{
 			printf("Star values after proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
-		}
+		} */
 
 		Costs(srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
-		printf("Cost star configuration: %f\n", starCosts->totalCosts);
-		printf("Cost best configuration: %f\n", bestCosts->totalCosts);
+		// printf("Cost star configuration: %f\n", starCosts->totalCosts);
+		// printf("Cost best configuration: %f\n", bestCosts->totalCosts);
 		// star has a better cost function than best cost, star is the new best
 		if (starCosts->totalCosts < bestCosts->totalCosts)
 		{
