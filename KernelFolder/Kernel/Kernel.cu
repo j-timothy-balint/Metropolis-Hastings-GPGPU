@@ -489,8 +489,8 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 	float width = srfRect1Max.x - srfRect1Min.x;
 	float height = srfRect1Max.y - srfRect1Min.y;
 	// Dividing the width by 2 makes sure that it stays withing a 95% percentile range that is usable, dividing it by 4 makes sure that it stretches the half of the length/width or lower (and that inside a 95% interval).
-	float stdXAxis = width / 4;
-	float stdYAxis = height / 4;
+	float stdXAxis = width / 16;
+	float stdYAxis = height / 16;
 
 	// printf("Selected mode: %d\n", p);
 	// Translate location using normal distribution
