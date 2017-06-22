@@ -350,8 +350,8 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 			// rectangle #1
 			//printf("Clearance\n");
 			//printf("Translation: X: %f Y: %f\n", cfg[i].x, cfg[i].y);
-			vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
-			vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
+			vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+			vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 
