@@ -649,7 +649,7 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
 	float randomNumber = curand_uniform(&rngStates[tid]);
 	//printf("Random number: %f\n", randomNumber);
-	return  randomNumber < fminf(1.0f, (float) exp(-BETA * (costStar - costCur)));
+	return  randomNumber < fminf(1.0f, (float) exp(BETA * (costStar - costCur)));
 }
 
 __device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surface* srf) 
