@@ -95,7 +95,7 @@ struct Surface
 	float WeightPairWise;
 	float WeightVisualBalance;
 	float WeightSymmetry;
-	float WeightOffLimitsCosts;
+	float WeightOffLimits;
 	float WeightClearance;
 	float WeightSurfaceArea;
 
@@ -472,7 +472,7 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	costs->SymmetryCosts = symmertryCosts;
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
-	float offlimitsCosts = srf->WeightOffLimitsCosts * OffLimitsCosts(srf, cfg, vertices, offlimits);
+	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	costs->OffLimitsCosts = offlimitsCosts;
 
