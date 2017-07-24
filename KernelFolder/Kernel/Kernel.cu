@@ -95,6 +95,7 @@ struct Surface
 	float WeightPairWise;
 	float WeightVisualBalance;
 	float WeightSymmetry;
+	float WeightOffLimitsCosts;
 	float WeightClearance;
 	float WeightSurfaceArea;
 
@@ -131,6 +132,7 @@ struct resultCosts
 	float FocalPointCosts;
 	float SymmetryCosts;
 	float ClearanceCosts;
+	float OffLimitsCosts;
 	float SurfaceAreaCosts;
 };
 
@@ -421,6 +423,37 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 	return error;
 }
 
+__device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *vertices, rectangle *offlimits) {
+	//printf("OffLimits cost calculation\n");
+	float error = 0.0f;
+	for (int i = 0; i < srf->nObjs; i++) {
+		for (int j = i+1; j < srf->nObjs; j++) {
+			// Determine max and min vectors of clearance rectangles
+			// rectangle #1
+			//printf("Clearance\n");
+			//printf("Translation: X: %f Y: %f\n", cfg[i].x, cfg[i].y);
+			vertex rect1Min = minValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
+			vertex rect1Max = maxValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
+
+			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+
+			// rectangle #2
+			//printf("Off limits\n");
+			//printf("Translation: X: %f Y: %f\n", cfg[j].x, cfg[j].y);
+			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
+			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
+
+			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
+
+			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
+			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
+			error -= area;
+		}
+	}
+	//printf("Clearance costs error: %f\n", error);
+	return error;
+}
+
 __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
 	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
@@ -438,6 +471,10 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
 	costs->SymmetryCosts = symmertryCosts;
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
+
+	float offlimitsCosts = srf->WeightOffLimitsCosts * OffLimitsCosts(srf, cfg, vertices, offlimits);
+	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
+	costs->OffLimitsCosts = offlimitsCosts;
 
 	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
@@ -460,6 +497,7 @@ __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo)
 	copyTo->SymmetryCosts = copyFrom->SymmetryCosts;
 	//printf("Copying Clearance costs with weight %f\n", copyFrom->ClearanceCosts);
 	copyTo->ClearanceCosts = copyFrom->ClearanceCosts;
+	copyTo->OffLimitsCosts = copyFrom->OffLimitsCosts;
 	//printf("Copying Surface area costs with weight %f\n", copyFrom->SurfaceAreaCosts);
 	copyTo->SurfaceAreaCosts = copyFrom->SurfaceAreaCosts;
 	copyTo->totalCosts = copyFrom->totalCosts;
@@ -728,6 +766,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts->SurfaceAreaCosts;
 	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
 	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts->ClearanceCosts;
+	resultCostsArray[blockIdx.x].OffLimitsCosts = bestCosts->OffLimitsCosts;
 
 	free(cfgCurrent);
 	free(currentCosts);
@@ -836,6 +875,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 		resultPointer[i].costs.totalCosts = outResultCosts[i].totalCosts;
 		resultPointer[i].costs.VisualBalanceCosts = outResultCosts[i].VisualBalanceCosts;
 		resultPointer[i].costs.ClearanceCosts = outResultCosts[i].ClearanceCosts;
+		resultPointer[i].costs.OffLimitsCosts = outResultCosts[i].OffLimitsCosts;
 		resultPointer[i].costs.SurfaceAreaCosts = outResultCosts[i].SurfaceAreaCosts;
 		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
 	}
