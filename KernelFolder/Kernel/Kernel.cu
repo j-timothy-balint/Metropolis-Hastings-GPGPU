@@ -84,6 +84,13 @@ struct relationshipStruct
 	double DegreesOfAtrraction;
 };
 
+struct relationshipAngleStruct{
+	double angleMin;
+	double angleMax;
+	int SourceIndex;
+	int TargetIndex;
+};
+
 struct Surface
 {
 	int nObjs;
@@ -141,6 +148,7 @@ struct result {
 	resultCosts costs;
 };
 
+//Sets up an inital pseudo-random state based on the experiment (which is the thread id and seed) and the sequence
 __global__ void initRNG(curandState *const rngStates, const unsigned int seed)
 {
 	// Determine thread ID
@@ -158,12 +166,28 @@ __device__ double Distance(float xi, float yi, float xj, float yj)
 	return sqrt(dX * dX + dY * dY);
 }
 
+//Determines the angular difference between two objects where i is oriented to j (i is bearing to j)
+__device__ double theta(float xi, float yi, float xj, float yj, float ti){
+	double dX = xi - xj;
+	double dY = yi - yj;
+	double theta_p = atan2(dY,dX); //gives us the angle between -PI and PI
+	
+	//and now between 0 and 2*pi
+	theta_p = (theta_p < 0)?2*PI+theta_p:theta_p;
+	//printf("theta_p=%f,ti=%f\n",theta_p,ti);
+	//return the re-oriented angle
+	double theta = theta_p - ti;
+	return (theta < 0)?2*PI+theta:theta;
+
+}
+
 // Theta is the rotation
 __device__ float phi(float xi, float yi, float xj, float yj, float tj)
 {
 	return atan2(yi - yj, xi - xj) - tj + PI / 2.0;
 }
 
+//This visual principle places the distibution of visual weight (perceptual salency, based on size) in the middle of the room
 __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 {
 	float nx = 0;
@@ -182,6 +206,7 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 	return -1.0 * Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2);
 }
 
+//This functional principle uses a lookup (relationshipStruct) to determine weights from recommended distances
 __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
 	double result = 0;
@@ -190,11 +215,13 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 		// Look up source index from relationship and retrieve object using that index.
 		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
 		//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
+		//penalize if we are too close
 		if (distance < rs[i].TargetRange.targetRangeStart)
 		{
 			double fraction = distance / rs[i].TargetRange.targetRangeStart;
 			result -= (fraction * fraction);
 		}
+		//penalize if we are too far
 		else if (distance > rs[i].TargetRange.targetRangeEnd) 
 		{
 			double fraction = rs[i].TargetRange.targetRangeEnd / distance;
@@ -205,6 +232,35 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 	return result;
 }
 
+//This functional principle uses a lookup (relationshipStruct) to determine weights from a recommended angle
+__device__ double PairWiseAngleCosts(Surface *srf, positionAndRotation* cfg, relationshipAngleStruct *rs)
+{
+	double result = 0;
+	//assuming (0,2*PI]
+	for (int i = 0; i < srf->nRelationships; i++)
+	{
+		// We use phi to calculate the angle between the rotation of the object and the target object
+		double distance = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y,cfg[rs[i].TargetIndex].rotY);
+		//printf("dist is %f, angle is %f\n",distance,cfg[rs[i].TargetIndex].rotY);
+		if(rs[i].angleMin > rs[i].angleMax){
+			//In this case, we need to determine a slightly different range because we are crossing the zero boundary
+			if(fmodf(rs[i].angleMin+distance, 2*PI) > rs[i].angleMax)
+				result -= fmin(fabs(distance - rs[i].angleMin),fabs(distance-rs[i].angleMax)); //Calculate the closest angular difference (un-normalized for now)
+		}
+		else if(rs[i].angleMin < distance || distance < rs[i].angleMax){
+			result -= fmin(fabs(distance - rs[i].angleMin),fabs(distance-rs[i].angleMax)); //Calculate the closest angular difference (un-normalized for now)
+		}
+		//Stick to zero as the perfect solution
+		//by doing percent error as an absolute value, we can go around the circle. Whichever bound is closer to is the one we want
+		//result -= 1.0f - fmaxf( 
+		//				       fabsf((distance - rs[i].angleMin)/rs[i].angleMin), 
+		//					   fabsf((distance - rs[i].angleMax)/rs[i].angleMax)
+		//					   );
+	}
+	return result;
+}
+
+//This visual criteria (emphasis in the paper) creates a dominant point in the room
 __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
 {
 	double sum = 0;
@@ -221,7 +277,7 @@ __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
 
 	return sum;
 }
-
+//This visual criteria (emphasis in the paper) causes the system to focus on similar grouping symmetry 
 __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 {
 	float sum = 0;
@@ -259,7 +315,7 @@ __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 	return sum;
 }
 
-
+//This function helper function is used to calculate the circulation of a room
 __device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, vertex rect2Min, vertex rect2Max) {
 	// printf("Clearance rectangle 1: Min X: %f Y: %f Max X: %f Y: %f\n", rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 	// printf("Clearance rectangle 2: Min X: %f Y: %f Max X: %f Y: %f\n", rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
@@ -281,6 +337,7 @@ __device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, ver
 	return area;
 }
 
+//Helper function for calculating the clearance
 __device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, vertex *complementRectangle1, vertex *complementRectangle2, vertex *complementRectangle3, vertex *complementRectangle4) {
 	// 0 is min value, 1 is max value
 	complementRectangle1[0].x = -DBL_MAX;
@@ -454,9 +511,9 @@ __device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *
 	return error;
 }
 
-__device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
+__device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, relationshipAngleStruct *ra, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
-	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
+	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs) *PairWiseAngleCosts(srf,cfg,ra);
 	costs->PairWiseCosts = pairWiseCosts;
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 
@@ -484,6 +541,7 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	costs->SurfaceAreaCosts = surfaceAreaCosts;
 
+	//The total cost is summed as the negitive weighting terms like alignment and emphasis are distributed in those functions themselves
 	float totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
 	// printf("Total costs %f\n", totalCosts);
 	costs->totalCosts = totalCosts;
@@ -672,7 +730,7 @@ __device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surfa
 // rs is an array with the length equal to the amount of relationships
 // cfg is an array with the length equal to the amount of objects
 // Surface is a basic struct
-__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
+__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs,relationshipAngleStruct *ra, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
 {
 //    printf("current block [%d, %d]:\n",\
 //            blockIdx.y*gridDim.x+blockIdx.x,\
@@ -686,7 +744,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	positionAndRotation* cfgCurrent = (positionAndRotation*) malloc(srf->nObjs * sizeof(positionAndRotation));
 	Copy(cfgCurrent, cfg, srf);
 	resultCosts* currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
-	Costs(srf, currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
+	Costs(srf, currentCosts, cfgCurrent, rs, ra, vertices, clearances, offlimits, surfaceRectangle);
 	
 	positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	Copy(cfgBest, cfgCurrent, srf);
@@ -715,7 +773,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 			printf("Star values after proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 		} */
 
-		Costs(srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
+		Costs(srf, starCosts, cfgStar, rs, ra, vertices, clearances, offlimits, surfaceRectangle);
 		// printf("Cost star configuration: %f\n", starCosts->totalCosts);
 		// printf("Cost best configuration: %f\n", bestCosts->totalCosts);
 		// star has a better cost function than best cost, star is the new best
@@ -774,7 +832,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	free(bestCosts);
 }
 
-extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
+extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss,relationshipAngleStruct *rsa, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
 {
 	// Create pointer for on gpu
 	// Determine memory size of object to transfer
@@ -784,6 +842,11 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	int rsSize = sizeof(relationshipStruct) * srf->nRelationships;
 	checkCudaErrors(cudaMalloc(&gpuRS, rsSize));
 	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
+
+	relationshipAngleStruct *gpuRA;
+	int rsaSize = sizeof(relationshipAngleStruct) * srf->nRelationships;
+	checkCudaErrors(cudaMalloc(&gpuRA, rsaSize));
+	checkCudaErrors(cudaMemcpy(gpuRA, rsa, rsaSize, cudaMemcpyHostToDevice));
 
 	// Input
 	positionAndRotation *gpuAlgoCFG;
@@ -838,7 +901,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	curandState *d_rngStates = 0;
 	checkCudaErrors(cudaMalloc((void **)&d_rngStates, gpuCfg->gridxDim * gpuCfg->blockxDim * sizeof(curandState)));
 
-	// Initialise random number generator
+	// Initialise random number generator as the grids and the blocks
 	initRNG <<<gpuCfg->gridxDim, gpuCfg->blockxDim >> > (d_rngStates, time(NULL));
 
 	// Commented for possible later usage
@@ -847,7 +910,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuAlgoCFG, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuRA, gpuAlgoCFG, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -1054,6 +1117,13 @@ int main(int argc, char **argv)
 	rss[0].SourceIndex = 0;
 	rss[0].TargetIndex = 1;
 
+	relationshipAngleStruct rsa[1];
+	rsa[0].angleMin = 7*PI/4;
+	rsa[0].angleMax = 7*PI/8;
+	rsa[0].SourceIndex = 0;
+	rsa[0].TargetIndex = 1;
+	printf("Target angles are (%f,%f)\n",rsa[0].angleMin,rsa[0].angleMax);
+
 	//for (int i = 0; i < NRel; i++) {
 	//	rss[i].TargetRange.targetRangeStart = 0.0;
 	//	rss[i].TargetRange.targetRangeEnd = 2.0;
@@ -1083,7 +1153,7 @@ int main(int argc, char **argv)
 
 	// Point test code:
 
-	result *result = KernelWrapper(rss, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, &gpuCfg);
+	result *result = KernelWrapper(rss, rsa, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, &gpuCfg);
 	printf("Results:\n");
 	for (int i = 0; i < gpuCfg.gridxDim; i++)
 	{
@@ -1100,6 +1170,7 @@ int main(int argc, char **argv)
 		}
 		
 	}
-
+	char hold;
+	scanf("%c",&hold);
  	return EXIT_SUCCESS;
 }
