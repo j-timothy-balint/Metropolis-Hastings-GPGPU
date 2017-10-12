@@ -30,7 +30,7 @@
 // Trig constants:
 #define PI (3.1416)
 
-#define BETA            (2.0)
+#define BETA (0.1)
 // Right angle constants:
 #define THETA_R (10.0 / 180.0 * PI) // 5 degrees
 
