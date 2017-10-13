@@ -243,12 +243,14 @@ __device__ double PairWiseAngleCosts(Surface *srf, positionAndRotation* cfg, rel
 		double distance = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y,cfg[rs[i].TargetIndex].rotY);
 		//printf("dist is %f, angle is %f\n",distance,cfg[rs[i].TargetIndex].rotY);
 		if(rs[i].angleMin > rs[i].angleMax){
+			double norm = (2*PI - (rs[i].angleMax +(2*PI - rs[i].angleMin)))/2.0;
 			//In this case, we need to determine a slightly different range because we are crossing the zero boundary
 			if(fmodf(rs[i].angleMin+distance, 2*PI) > rs[i].angleMax)
-				result -= fmin(fabs(distance - rs[i].angleMin),fabs(distance-rs[i].angleMax)); //Calculate the closest angular difference (un-normalized for now)
+				result -= fmin(fabs(distance - rs[i].angleMin),fabs(distance-rs[i].angleMax))/norm; //Calculate the closest angular difference (un-normalized for now)
 		}
 		else if(rs[i].angleMin < distance || distance < rs[i].angleMax){
-			result -= fmin(fabs(distance - rs[i].angleMin),fabs(distance-rs[i].angleMax)); //Calculate the closest angular difference (un-normalized for now)
+			double norm = (2*PI - (rs[i].angleMax - rs[i].angleMin))/2.0; //The max distance away is half the slice that is in the no zone 
+			result -= fmin(fabs(distance - rs[i].angleMin),fabs(distance-rs[i].angleMax))/norm; //Calculate the closest angular difference (un-normalized for now)
 		}
 		//Stick to zero as the perfect solution
 		//by doing percent error as an absolute value, we can go around the circle. Whichever bound is closer to is the one we want
@@ -315,7 +317,7 @@ __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 	return sum;
 }
 
-//This function helper function is used to calculate the circulation of a room
+//This function helper function is used to calculate the clearence of a room
 __device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, vertex rect2Min, vertex rect2Max) {
 	// printf("Clearance rectangle 1: Min X: %f Y: %f Max X: %f Y: %f\n", rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 	// printf("Clearance rectangle 2: Min X: %f Y: %f Max X: %f Y: %f\n", rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
@@ -1118,8 +1120,8 @@ int main(int argc, char **argv)
 	rss[0].TargetIndex = 1;
 
 	relationshipAngleStruct rsa[1];
-	rsa[0].angleMin = 7*PI/4;
-	rsa[0].angleMax = 7*PI/8;
+	rsa[0].angleMin = PI/4;
+	rsa[0].angleMax = 5*PI/8;
 	rsa[0].SourceIndex = 0;
 	rsa[0].TargetIndex = 1;
 	printf("Target angles are (%f,%f)\n",rsa[0].angleMin,rsa[0].angleMax);
