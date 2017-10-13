@@ -538,8 +538,11 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
 
 		// Potential never ending loop when everything is frozen
-		while (cfgStar[obj].frozen)
-			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
+		int counter = 0;
+		while (cfgStar[obj].frozen && counter < 100) {
+			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+			counter++;
+		}
 
 		//printf("Selected object #: %d\n", obj);
 		float dx = curand_normal(&rngStates[tid]);
@@ -574,8 +577,11 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 	else if (p == 1)
 	{
 		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
-		while (cfgStar[obj].frozen)
-			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
+		int counter = 0;
+		while (cfgStar[obj].frozen && counter < 100) {
+			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+			counter++;
+		}
 		// printf("Selected object #: %d\n", obj);
 		// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 		float dRot = curand_normal(&rngStates[tid]);
@@ -599,12 +605,19 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 		}
 		// This can result in the same object, chance becomes increasingly smaller given more objects
 		int obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
-		while (cfgStar[obj1].frozen)
-			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
+
+		int counter = 0;
+		while (cfgStar[obj1].frozen && counter < 100) {
+			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+			counter++;
+		}
 
 		int obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
-		while (cfgStar[obj2].frozen)
-			obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
+		counter = 0;
+		while (cfgStar[obj2].frozen && counter < 100) {
+			obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+			counter++;
+		}
 		// printf("First selected object #: %d\n", obj1);
 		// printf("Second selected object #: %d\n", obj2);
 
