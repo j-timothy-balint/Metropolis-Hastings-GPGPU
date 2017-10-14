@@ -534,14 +534,18 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 	// Translate location using normal distribution
 	if (p == 0)
 	{
-		// randomly choose an object
-		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
-
-		// Potential never ending loop when everything is frozen
-		int counter = 0;
-		while (cfgStar[obj].frozen && counter < 100) {
+		bool found = false;
+		int obj = -1;
+		// Take 100 tries to find a random nonfrozen object
+		for (int i = 0; i < 100; i++) {
 			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			counter++;
+			if (!cfgStar[obj].frozen) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return;
 		}
 
 		//printf("Selected object #: %d\n", obj);
@@ -576,11 +580,19 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 	// Translate rotation using normal distribution
 	else if (p == 1)
 	{
-		int obj = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
-		int counter = 0;
-		while (cfgStar[obj].frozen && counter < 100) {
+		int obj = -1;
+		bool found = false;
+
+		// Take 100 tries to find a random nonfrozen object
+		for (int i = 0; i < 100; i++) {
 			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			counter++;
+			if (!cfgStar[obj].frozen) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return;
 		}
 		// printf("Selected object #: %d\n", obj);
 		// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
@@ -604,19 +616,34 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 			return;
 		}
 		// This can result in the same object, chance becomes increasingly smaller given more objects
-		int obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
+		int obj1 = -1;
+		bool found = false;
 
-		int counter = 0;
-		while (cfgStar[obj1].frozen && counter < 100) {
+		// Take 100 tries to find a random nonfrozen object
+		for (int i = 0; i < 100; i++) {
 			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			counter++;
+			if (!cfgStar[obj1].frozen) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return;
 		}
 
-		int obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs-1, 0);
-		counter = 0;
-		while (cfgStar[obj2].frozen && counter < 100) {
+		int obj2 = -1;
+		found = false;
+
+		// Take 100 tries to find a random nonfrozen object
+		for (int i = 0; i < 100; i++) {
 			obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			counter++;
+			if (!cfgStar[obj2].frozen) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return;
 		}
 		// printf("First selected object #: %d\n", obj1);
 		// printf("Second selected object #: %d\n", obj2);
