@@ -477,18 +477,18 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	costs->SymmetryCosts = symmertryCosts;
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
-	//float offlimitsCosts = 0;
-	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
+	float offlimitsCosts = 0;
+	//float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	costs->OffLimitsCosts = offlimitsCosts;
 
-	//float clearanceCosts = 0;
-	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
+	float clearanceCosts = 0;
+	//float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
 	costs->ClearanceCosts = clearanceCosts;
 
-	//float surfaceAreaCosts = 0;
-	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
+	float surfaceAreaCosts = 0;
+	//float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	costs->SurfaceAreaCosts = surfaceAreaCosts;
 
@@ -745,6 +745,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 
 	for (int i = 0; i < gpuCfg->iterations; i++)
 	{
+		//printf("iteration: %d\n", i);
 		// Create cfg Star and initialize it to cfgcurrent that will have a proposition done to it.
 		positionAndRotation* cfgStar = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 		resultCosts* starCosts = (resultCosts*)malloc(sizeof(resultCosts));
@@ -1220,12 +1221,12 @@ int main(int argc, char **argv)
 
 	gpuConfig gpuCfg;
 
-	gpuCfg.gridxDim = 10;
+	gpuCfg.gridxDim = 1;
 	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = 256;
+	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 200;
+	gpuCfg.iterations = 1000;
 
 	// Point test code:
 
