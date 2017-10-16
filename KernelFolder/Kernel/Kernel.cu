@@ -971,9 +971,9 @@ int main(int argc, char **argv)
 {
 	basicCudaDeviceInformation(argc, argv);
 
-	const int N = 30;
+	const int N = 10;
 	const int NRel = 0;
-	const int NClearances = 90;
+	const int NClearances = 30;
 	Surface srf;
 	srf.nObjs = N;
 	srf.nRelationships = NRel;
@@ -990,6 +990,17 @@ int main(int argc, char **argv)
 	srf.focalX = 5.0;
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
+
+	const int dimensions = 5;
+
+	gpuConfig gpuCfg;
+
+	gpuCfg.gridxDim = dimensions;
+	gpuCfg.gridyDim = 0;
+	gpuCfg.blockxDim = 1;
+	gpuCfg.blockyDim = 0;
+	gpuCfg.blockzDim = 0;
+	gpuCfg.iterations = 500;
 
 	vertex surfaceRectangle[4];
 	surfaceRectangle[0].x = 10;
@@ -1104,17 +1115,23 @@ int main(int argc, char **argv)
 		offlimits[i].SourceIndex = 0;
 	}
 
-	positionAndRotation cfg[N];
-	for (int i = 0; i < N; i++) {
-		cfg[i].x = -6.4340348243713379;
-		cfg[i].y = -2.12361741065979;
-		cfg[i].z = 0.0;
-		cfg[i].rotX = 0.0;
-		cfg[i].rotY = 5.5179219245910645;
-		cfg[i].rotZ = 0.0;
-		cfg[i].frozen = false;
-		cfg[i].length = 1.7677083015441895;
-		cfg[i].width = 2.2480521202087402;
+	point cfg[N*dimensions];
+	for (int i = 0; i < dimensions; i++) {
+		for (unsigned int j = 0; j < N; j++)
+		{
+			// BlockId counts from 0, so to properly multiply
+			int index = i * N + j;
+
+			cfg[index].x = -6.4340348243713379;
+			cfg[index].y = -2.12361741065979;
+			cfg[index].z = 0.0;
+			cfg[index].rotX = 0.0;
+			cfg[index].rotY = 5.5179219245910645;
+			cfg[index].rotZ = 0.0;
+			cfg[index].frozen = false;
+			cfg[index].length = 1.7677083015441895;
+			cfg[index].width = 2.2480521202087402;
+		}
 	}
 
 	// Create relationship
@@ -1142,15 +1159,6 @@ int main(int argc, char **argv)
 	//	rss[i].Target.rotZ = 1.0;
 	//	rss[i].DegreesOfAtrraction = 2.0;
 	//}
-
-	gpuConfig gpuCfg;
-
-	gpuCfg.gridxDim = 1;
-	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = 1;
-	gpuCfg.blockyDim = 0;
-	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 50;
 
 	// Point test code:
 
