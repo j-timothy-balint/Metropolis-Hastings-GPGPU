@@ -347,13 +347,14 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 	//printf("Clearance cost calculation\n");
 	float error = 0.0f;
 	for (int i = 0; i < srf->nClearances; i++) {
+		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+
 		for (int j = 0; j < srf->nObjs; j++) {
 			// Determine max and min vectors of clearance rectangles
 			// rectangle #1
 			//printf("Clearance\n");
 			//printf("Translation: X: %f Y: %f\n", cfg[i].x, cfg[i].y);
-			vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-			vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 
@@ -456,33 +457,41 @@ __device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *
 
 __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
+	//float pairWiseCosts = 0;
 	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
 	costs->PairWiseCosts = pairWiseCosts;
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 
+	//float visualBalanceCosts = 0;
 	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
 	costs->VisualBalanceCosts = visualBalanceCosts;
 	// printf("Visual balance costs with weight %f\n", visualBalanceCosts);
 
+	//float focalPointCosts = 0;
 	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
 	costs->FocalPointCosts = focalPointCosts;
 	// printf("Focal point costs with weight %f\n", focalPointCosts);
 
+	//float symmertryCosts = 0;
 	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
 	costs->SymmetryCosts = symmertryCosts;
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
+	//float offlimitsCosts = 0;
 	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	costs->OffLimitsCosts = offlimitsCosts;
 
+	//float clearanceCosts = 0;
 	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
 	costs->ClearanceCosts = clearanceCosts;
 
+	//float surfaceAreaCosts = 0;
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	costs->SurfaceAreaCosts = surfaceAreaCosts;
+
 
 	float totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
 	// printf("Total costs %f\n", totalCosts);
@@ -943,19 +952,20 @@ int main(int argc, char **argv)
 {
 	basicCudaDeviceInformation(argc, argv);
 
-	const int N = 2;
-	const int NRel = 1;
-	const int NClearances = 2;
+	const int N = 5;
+	const int NRel = 0;
+	const int NClearances = 15;
 	Surface srf;
 	srf.nObjs = N;
 	srf.nRelationships = NRel;
 	srf.nClearances = NClearances;
-	srf.WeightFocalPoint = -2.0f;
-	srf.WeightPairWise = -2.0f;
-	srf.WeightVisualBalance = 1.5f;
-	srf.WeightSymmetry = -2.0;
-	srf.WeightClearance = -2.0;
-	srf.WeightSurfaceArea = -2.0;
+	srf.WeightFocalPoint = 1.0f;
+	srf.WeightPairWise = 1.0f;
+	srf.WeightVisualBalance = 1.0f;
+	srf.WeightSymmetry = 1.0f;
+	srf.WeightClearance = 1.0f;
+	srf.WeightSurfaceArea = 1.0f;
+	srf.WeightOffLimits = 1.0f;
 	srf.centroidX = 0.0;
 	srf.centroidY = 0.0;
 	srf.focalX = 5.0;
@@ -979,75 +989,76 @@ int main(int argc, char **argv)
 	surfaceRectangle[3].y = 10;
 	surfaceRectangle[3].z = 0;
 
+	const int vertices = (N + NClearances) * 4;
+	vertex vtx[vertices];
+	for (int i = 0; i < (N); i++) {
+		vtx[i*16+0].x = -1.8853001594543457;
+		vtx[i*16 + 0].y = 1.1240049600601196;
+		vtx[i*16 +0].z = 0;
 
-	vertex vtx[16];
-	// Clearance shapes
-	vtx[0].x = 2;
-	vtx[0].y = 2;
-	vtx[0].z = 0;
+		vtx[i*16 + 1].x = -0.88530009984970093;
+		vtx[i*16 + 1].y = 1.1240049600601196;
+		vtx[i*16 + 1].z = 0;
 
-	vtx[1].x = 2;
-	vtx[1].y = 0;
-	vtx[1].z = 0;
+		vtx[i*16 + 2].x = -0.88530009984970093;
+		vtx[i*16 + 2].y = -1.1240470409393311;
+		vtx[i*16 + 2].z = 0;
 
-	vtx[2].x = 0;
-	vtx[2].y = 0;
-	vtx[2].z = 0;
+		vtx[i*16 + 3].x = -1.8853001594543457;
+		vtx[i*16 + 3].y = -1.1240470409393311;
+		vtx[i*16 + 3].z = 0;
 
-	vtx[3].x = 0;
-	vtx[3].y = 2;
-	vtx[3].z = 0;
+		vtx[i*16 + 4].x = 0.88240820169448853;
+		vtx[i*16 + 4].y = 1.1240049600601196;
+		vtx[i*16 + 4].z = 0;
 
-	vtx[4].x = 3;
-	vtx[4].y = 2;
-	vtx[4].z = 0;
+		vtx[i*16 + 5].x = 1.8824081420898437;
+		vtx[i*16 + 5].y = 1.1240049600601196;
+		vtx[i*16 + 5].z = 0;
 
-	vtx[5].x = 3;
-	vtx[5].y = 0;
-	vtx[5].z = 0;
+		vtx[i*16 + 6].x = 1.8824081420898437;
+		vtx[i*16 + 6].y = -1.1240470409393311;
+		vtx[i*16 + 6].z = 0;
 
-	vtx[6].x = 1;
-	vtx[6].y = 0;
-	vtx[6].z = 0;
+		vtx[i*16 + 7].x = 0.88240820169448853;
+		vtx[i*16 + 7].y = -1.1240470409393311;
+		vtx[i*16 + 7].z = 0;
 
-	vtx[7].x = 1;
-	vtx[7].y = 2;
-	vtx[7].z = 0;
+		vtx[i*16 + 8].x = -0.88530009984970093;
+		vtx[i*16 + 8].y = 2.12400484085083;
+		vtx[i*16 + 8].z = 0;
 
-	// Off limits
-	vtx[8].x = 2;
-	vtx[8].y = 2;
-	vtx[8].z = 0;
+		vtx[i*16 + 9].x = 0.88240820169448853;
+		vtx[i*16 + 9].y = 2.12400484085083;
+		vtx[i*16 + 9].z = 0;
 
-	vtx[9].x = 2;
-	vtx[9].y = 0;
-	vtx[9].z = 0;
+		vtx[i*16 + 10].x = 0.88240820169448853;
+		vtx[i*16 + 10].y = 1.1240049600601196;
+		vtx[i*16 + 10].z = 0;
 
-	vtx[10].x = 0;
-	vtx[10].y = 0;
-	vtx[10].z = 0;
+		vtx[i*16 + 11].x = -0.88530009984970093;
+		vtx[i*16 + 11].y = 1.1240049600601196;
+		vtx[i*16 + 11].z = 0;
 
-	vtx[11].x = 0;
-	vtx[11].y = 2;
-	vtx[11].z = 0;
+		vtx[i*16 + 12].x = -7.3193349838256836;
+		vtx[i*16 + 12].y = -0.99961233139038086;
+		vtx[i*16 + 12].z = 1.2984378337860107;
 
-	vtx[12].x = 3;
-	vtx[12].y = 2;
-	vtx[12].z = 0;
+		vtx[i*16 + 13].x = -5.5516266822814941;
+		vtx[i*16 + 13].y = -0.99961233139038086;
+		vtx[i*16 + 13].z = 1.2984378337860107;
 
-	vtx[13].x = 3;
-	vtx[13].y = 0;
-	vtx[13].z = 0;
+		vtx[i*16 + 14].x = -5.5516266822814941;
+		vtx[i*16 + 14].y = -3.2476644515991211;
+		vtx[i*16 + 14].z = 1.2984378337860107;
 
-	vtx[14].x = 1;
-	vtx[14].y = 0;
-	vtx[14].z = 0;
-
-	vtx[15].x = 1;
-	vtx[15].y = 2;
-	vtx[15].z = 0;
+		vtx[i*16 + 15].x = -7.3193349838256836;
+		vtx[i*16 + 15].y = -3.2476644515991211;
+		vtx[i*16 + 15].z = 1.2984378337860107;
+	}
 
 	rectangle clearances[NClearances];
+	rectangle offlimits[N];
 	clearances[0].point1Index = 0;
 	clearances[0].point2Index = 1;
 	clearances[0].point3Index = 2;
@@ -1058,32 +1069,127 @@ int main(int argc, char **argv)
 	clearances[1].point2Index = 5;
 	clearances[1].point3Index = 6;
 	clearances[1].point4Index = 7;
-	clearances[1].SourceIndex = 1;
+	clearances[1].SourceIndex = 0;
 
-	rectangle offlimits[N];
-	offlimits[0].point1Index = 8;
-	offlimits[0].point2Index = 9;
-	offlimits[0].point3Index = 10;
-	offlimits[0].point4Index = 11;
+	clearances[2].point1Index = 8;
+	clearances[2].point2Index = 9;
+	clearances[2].point3Index = 10;
+	clearances[2].point4Index = 11;
+	clearances[2].SourceIndex = 0;
+
+	offlimits[0].point1Index = 12;
+	offlimits[0].point2Index = 13;
+	offlimits[0].point3Index = 14;
+	offlimits[0].point4Index = 15;
 	offlimits[0].SourceIndex = 0;
 
-	offlimits[1].point1Index = 12;
-	offlimits[1].point2Index = 13;
-	offlimits[1].point3Index = 14;
-	offlimits[1].point4Index = 15;
+	clearances[3].point1Index = 16;
+	clearances[3].point2Index = 17;
+	clearances[3].point3Index = 18;
+	clearances[3].point4Index = 19;
+	clearances[3].SourceIndex = 1;
+
+	clearances[4].point1Index = 20;
+	clearances[4].point2Index = 21;
+	clearances[4].point3Index = 22;
+	clearances[4].point4Index = 23;
+	clearances[4].SourceIndex = 1;
+
+	clearances[5].point1Index = 24;
+	clearances[5].point2Index = 25;
+	clearances[5].point3Index = 26;
+	clearances[5].point4Index = 27;
+	clearances[5].SourceIndex = 1;
+
+	offlimits[1].point1Index = 28;
+	offlimits[1].point2Index = 29;
+	offlimits[1].point3Index = 30;
+	offlimits[1].point4Index = 31;
 	offlimits[1].SourceIndex = 1;
+
+	clearances[6].point1Index = 32;
+	clearances[6].point2Index = 33;
+	clearances[6].point3Index = 34;
+	clearances[6].point4Index = 35;
+	clearances[6].SourceIndex = 2;
+
+	clearances[7].point1Index = 36;
+	clearances[7].point2Index = 37;
+	clearances[7].point3Index = 38;
+	clearances[7].point4Index = 39;
+	clearances[7].SourceIndex = 2;
+
+	clearances[8].point1Index = 40;
+	clearances[8].point2Index = 41;
+	clearances[8].point3Index = 42;
+	clearances[8].point4Index = 43;
+	clearances[8].SourceIndex = 2;
+
+	offlimits[2].point1Index = 44;
+	offlimits[2].point2Index = 45;
+	offlimits[2].point3Index = 46;
+	offlimits[2].point4Index = 47;
+	offlimits[2].SourceIndex = 2;
+
+	clearances[9].point1Index = 48;
+	clearances[9].point2Index = 49;
+	clearances[9].point3Index = 50;
+	clearances[9].point4Index = 51;
+	clearances[9].SourceIndex = 3;
+
+	clearances[10].point1Index = 52;
+	clearances[10].point2Index = 53;
+	clearances[10].point3Index = 54;
+	clearances[10].point4Index = 55;
+	clearances[10].SourceIndex = 3;
+
+	clearances[11].point1Index = 56;
+	clearances[11].point2Index = 57;
+	clearances[11].point3Index = 58;
+	clearances[11].point4Index = 59;
+	clearances[11].SourceIndex = 3;
+
+	offlimits[3].point1Index = 60;
+	offlimits[3].point2Index = 61;
+	offlimits[3].point3Index = 62;
+	offlimits[3].point4Index = 63;
+	offlimits[3].SourceIndex = 3;
+
+	clearances[12].point1Index = 64;
+	clearances[12].point2Index = 65;
+	clearances[12].point3Index = 66;
+	clearances[12].point4Index = 67;
+	clearances[12].SourceIndex = 4;
+
+	clearances[13].point1Index = 68;
+	clearances[13].point2Index = 69;
+	clearances[13].point3Index = 70;
+	clearances[13].point4Index = 71;
+	clearances[13].SourceIndex = 4;
+
+	clearances[14].point1Index = 72;
+	clearances[14].point2Index = 73;
+	clearances[14].point3Index = 74;
+	clearances[14].point4Index = 75;
+	clearances[14].SourceIndex = 4;
+
+	offlimits[4].point1Index = 76;
+	offlimits[4].point2Index = 77;
+	offlimits[4].point3Index = 78;
+	offlimits[4].point4Index = 79;
+	offlimits[4].SourceIndex = 4;
 
 	positionAndRotation cfg[N];
 	for (int i = 0; i < N; i++) {
-		cfg[i].x = i * 2.0;
-		cfg[i].y = i * 2.0;
+		cfg[i].x = -6.4340348243713379;
+		cfg[i].y = -2.12361741065979;
 		cfg[i].z = 0.0;
 		cfg[i].rotX = 0.0;
-		cfg[i].rotY = 0.0;
+		cfg[i].rotY = 5.5179219245910645;
 		cfg[i].rotZ = 0.0;
 		cfg[i].frozen = false;
-		cfg[i].length = 1.0;
-		cfg[i].width = 1.0;
+		cfg[i].length = 1.7677083015441895;
+		cfg[i].width = 2.2480521202087402;
 	}
 
 	// Create relationship
@@ -1114,9 +1220,9 @@ int main(int argc, char **argv)
 
 	gpuConfig gpuCfg;
 
-	gpuCfg.gridxDim = 1;
+	gpuCfg.gridxDim = 10;
 	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = 1;
+	gpuCfg.blockxDim = 256;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
 	gpuCfg.iterations = 200;
