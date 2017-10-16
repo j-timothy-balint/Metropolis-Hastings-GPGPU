@@ -122,6 +122,10 @@ struct gpuConfig
 struct point
 {
 	float x, y, z, rotX, rotY, rotZ;
+	bool frozen;
+
+	double length;
+	double width;
 };
 
 struct resultCosts
@@ -477,8 +481,8 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	costs->SymmetryCosts = symmertryCosts;
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
-	float offlimitsCosts = 0;
-	//float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
+	//float offlimitsCosts = 0;
+	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	costs->OffLimitsCosts = offlimitsCosts;
 
@@ -721,19 +725,35 @@ __device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surfa
 // rs is an array with the length equal to the amount of relationships
 // cfg is an array with the length equal to the amount of objects
 // Surface is a basic struct
-__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
+__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
 {
 //    printf("current block [%d, %d]:\n",\
 //            blockIdx.y*gridDim.x+blockIdx.x,\
 //            threadIdx.z*blockDim.x*blockDim.y+threadIdx.y*blockDim.x+threadIdx.x);
 	// Calculate current tid
 	unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
-	// Retrieve local state from rng states
-	//printf("test random number 1: %f\n", curand_uniform(&rngStates[tid]));
-	
+	// Read out starting configuration from resultArray
+	// Copy best config (now set to input config) to result of this block
+
+
 	// Initialize current configuration
 	positionAndRotation* cfgCurrent = (positionAndRotation*) malloc(srf->nObjs * sizeof(positionAndRotation));
-	Copy(cfgCurrent, cfg, srf);
+	// Copy from result(previous)
+	for (unsigned int i = 0; i < srf->nObjs; i++)
+	{
+		// BlockId counts from 0, so to properly multiply
+		int index = blockIdx.x * srf->nObjs + i;
+		cfgCurrent[i].x = p[index].x;
+		cfgCurrent[i].y = p[index].y;
+		cfgCurrent[i].z = p[index].z;
+		cfgCurrent[i].rotX = p[index].rotX;
+		cfgCurrent[i].rotY = p[index].rotY;
+		cfgCurrent[i].rotZ = p[index].rotZ;
+		cfgCurrent[i].frozen = p[index].frozen;
+		cfgCurrent[i].length = p[index].length;
+		cfgCurrent[i].width = p[index].width;
+	}
+	// Copy(cfgCurrent, cfg, srf);
 	resultCosts* currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
 	Costs(srf, currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
 	
@@ -805,6 +825,9 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		p[index].rotX = cfgBest[i].rotX;
 		p[index].rotY = cfgBest[i].rotY;
 		p[index].rotZ = cfgBest[i].rotZ;
+		p[index].frozen = cfgBest[i].frozen;
+		p[index].length = cfgBest[i].length;
+		p[index].width = cfgBest[i].width;
 	}
 	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 	resultCostsArray[blockIdx.x].totalCosts = bestCosts->totalCosts;
@@ -824,7 +847,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	free(bestCosts);
 }
 
-extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, positionAndRotation* cfg, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
+extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
 {
 	// Create pointer for on gpu
 	// Determine memory size of object to transfer
@@ -836,11 +859,6 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
 
 	// Input
-	positionAndRotation *gpuAlgoCFG;
-	int algoCFGSize = sizeof(positionAndRotation) * srf->nObjs;
-	checkCudaErrors(cudaMalloc(&gpuAlgoCFG, algoCFGSize));
-	checkCudaErrors(cudaMemcpy(gpuAlgoCFG, cfg, algoCFGSize, cudaMemcpyHostToDevice));
-
 	rectangle *gpuClearances;
 	int clearancesSize = sizeof(rectangle) * srf->nClearances;
 	checkCudaErrors(cudaMalloc(&gpuClearances, clearancesSize));
@@ -876,6 +894,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	int pointArraySize = srf->nObjs * sizeof(point) * gpuCfg->gridxDim;
 	point *outPointArray = (point *) malloc(pointArraySize);
 	checkCudaErrors(cudaMalloc((void**)&gpuPointArray, pointArraySize));
+	checkCudaErrors(cudaMemcpy(gpuPointArray, previouscfgs, pointArraySize, cudaMemcpyHostToDevice));
 
 	resultCosts *gpuResultCosts;
 	int resultCostsSize = sizeof(resultCosts) * gpuCfg->gridxDim;
@@ -897,7 +916,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuAlgoCFG, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -910,7 +929,6 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 
 	// Free all allocated GPU memory
 	cudaFree(gpuRS);
-	cudaFree(gpuAlgoCFG);
 	cudaFree(gpuSRF);
 	cudaFree(gpuGpuConfig);
 	cudaFree(gpuPointArray);
@@ -953,9 +971,9 @@ int main(int argc, char **argv)
 {
 	basicCudaDeviceInformation(argc, argv);
 
-	const int N = 5;
+	const int N = 30;
 	const int NRel = 0;
-	const int NClearances = 15;
+	const int NClearances = 90;
 	Surface srf;
 	srf.nObjs = N;
 	srf.nRelationships = NRel;
@@ -1060,125 +1078,31 @@ int main(int argc, char **argv)
 
 	rectangle clearances[NClearances];
 	rectangle offlimits[N];
-	clearances[0].point1Index = 0;
-	clearances[0].point2Index = 1;
-	clearances[0].point3Index = 2;
-	clearances[0].point4Index = 3;
-	clearances[0].SourceIndex = 0;
+	for (int i = 0; i < N; i++) {
+		clearances[i*3].point1Index = i*15 + 0;
+		clearances[i * 3].point2Index = i * 15 + 1;
+		clearances[i * 3].point3Index = i * 15 + 2;
+		clearances[i * 3].point4Index = i * 15 + 3;
+		clearances[i * 3].SourceIndex = i;
 
-	clearances[1].point1Index = 4;
-	clearances[1].point2Index = 5;
-	clearances[1].point3Index = 6;
-	clearances[1].point4Index = 7;
-	clearances[1].SourceIndex = 0;
+		clearances[i * 3  + 1].point1Index = i * 15 + 4;
+		clearances[i * 3 + 1].point2Index = i * 15 + 5;
+		clearances[i * 3 + 1].point3Index = i * 15 + 6;
+		clearances[i * 3 + 1].point4Index = i * 15 + 7;
+		clearances[i * 3 + 1].SourceIndex = i;
 
-	clearances[2].point1Index = 8;
-	clearances[2].point2Index = 9;
-	clearances[2].point3Index = 10;
-	clearances[2].point4Index = 11;
-	clearances[2].SourceIndex = 0;
+		clearances[i * 3 + 2].point1Index = i * 15 + 8;
+		clearances[i * 3 + 2].point2Index = i * 15 + 9;
+		clearances[i * 3 + 2].point3Index = i * 15 + 10;
+		clearances[i * 3 + 2].point4Index = i * 15 + 11;
+		clearances[i * 3 + 2].SourceIndex = i;
 
-	offlimits[0].point1Index = 12;
-	offlimits[0].point2Index = 13;
-	offlimits[0].point3Index = 14;
-	offlimits[0].point4Index = 15;
-	offlimits[0].SourceIndex = 0;
-
-	clearances[3].point1Index = 16;
-	clearances[3].point2Index = 17;
-	clearances[3].point3Index = 18;
-	clearances[3].point4Index = 19;
-	clearances[3].SourceIndex = 1;
-
-	clearances[4].point1Index = 20;
-	clearances[4].point2Index = 21;
-	clearances[4].point3Index = 22;
-	clearances[4].point4Index = 23;
-	clearances[4].SourceIndex = 1;
-
-	clearances[5].point1Index = 24;
-	clearances[5].point2Index = 25;
-	clearances[5].point3Index = 26;
-	clearances[5].point4Index = 27;
-	clearances[5].SourceIndex = 1;
-
-	offlimits[1].point1Index = 28;
-	offlimits[1].point2Index = 29;
-	offlimits[1].point3Index = 30;
-	offlimits[1].point4Index = 31;
-	offlimits[1].SourceIndex = 1;
-
-	clearances[6].point1Index = 32;
-	clearances[6].point2Index = 33;
-	clearances[6].point3Index = 34;
-	clearances[6].point4Index = 35;
-	clearances[6].SourceIndex = 2;
-
-	clearances[7].point1Index = 36;
-	clearances[7].point2Index = 37;
-	clearances[7].point3Index = 38;
-	clearances[7].point4Index = 39;
-	clearances[7].SourceIndex = 2;
-
-	clearances[8].point1Index = 40;
-	clearances[8].point2Index = 41;
-	clearances[8].point3Index = 42;
-	clearances[8].point4Index = 43;
-	clearances[8].SourceIndex = 2;
-
-	offlimits[2].point1Index = 44;
-	offlimits[2].point2Index = 45;
-	offlimits[2].point3Index = 46;
-	offlimits[2].point4Index = 47;
-	offlimits[2].SourceIndex = 2;
-
-	clearances[9].point1Index = 48;
-	clearances[9].point2Index = 49;
-	clearances[9].point3Index = 50;
-	clearances[9].point4Index = 51;
-	clearances[9].SourceIndex = 3;
-
-	clearances[10].point1Index = 52;
-	clearances[10].point2Index = 53;
-	clearances[10].point3Index = 54;
-	clearances[10].point4Index = 55;
-	clearances[10].SourceIndex = 3;
-
-	clearances[11].point1Index = 56;
-	clearances[11].point2Index = 57;
-	clearances[11].point3Index = 58;
-	clearances[11].point4Index = 59;
-	clearances[11].SourceIndex = 3;
-
-	offlimits[3].point1Index = 60;
-	offlimits[3].point2Index = 61;
-	offlimits[3].point3Index = 62;
-	offlimits[3].point4Index = 63;
-	offlimits[3].SourceIndex = 3;
-
-	clearances[12].point1Index = 64;
-	clearances[12].point2Index = 65;
-	clearances[12].point3Index = 66;
-	clearances[12].point4Index = 67;
-	clearances[12].SourceIndex = 4;
-
-	clearances[13].point1Index = 68;
-	clearances[13].point2Index = 69;
-	clearances[13].point3Index = 70;
-	clearances[13].point4Index = 71;
-	clearances[13].SourceIndex = 4;
-
-	clearances[14].point1Index = 72;
-	clearances[14].point2Index = 73;
-	clearances[14].point3Index = 74;
-	clearances[14].point4Index = 75;
-	clearances[14].SourceIndex = 4;
-
-	offlimits[4].point1Index = 76;
-	offlimits[4].point2Index = 77;
-	offlimits[4].point3Index = 78;
-	offlimits[4].point4Index = 79;
-	offlimits[4].SourceIndex = 4;
+		offlimits[i].point1Index = i * 15 + 12;
+		offlimits[i].point2Index = i * 15 + 13;
+		offlimits[i].point3Index = i * 15 + 14;
+		offlimits[i].point4Index = i * 15 + 15;
+		offlimits[i].SourceIndex = 0;
+	}
 
 	positionAndRotation cfg[N];
 	for (int i = 0; i < N; i++) {
@@ -1226,7 +1150,7 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = 1;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 1000;
+	gpuCfg.iterations = 50;
 
 	// Point test code:
 
