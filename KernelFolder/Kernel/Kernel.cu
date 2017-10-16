@@ -929,9 +929,14 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 
 	// Free all allocated GPU memory
 	cudaFree(gpuRS);
+	cudaFree(gpuClearances);
+	cudaFree(gpuOfflimits);
+	cudaFree(gpuVertices);
+	cudaFree(gpuSurfaceRectangle);
 	cudaFree(gpuSRF);
 	cudaFree(gpuGpuConfig);
 	cudaFree(gpuPointArray);
+	cudaFree(gpuResultCosts);
 
 	// Construct return result
 	result *resultPointer = (result*)malloc(sizeof(result) * gpuCfg->gridxDim);
