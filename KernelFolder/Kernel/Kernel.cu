@@ -195,13 +195,14 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 {
 	int tid = threadIdx.x;
 	int step = blockDim.x;
-	extern __shared__ float nx[];// = 0;
-	extern __shared__ float ny[];// = 0;
-	extern __shared__ float denom[];// = 0;
-
-	nx[tid] = 0;
-	ny[tid] = 0;
-	denom[tid] = 0;
+	extern __shared__ float values[];
+	float* nx    = (float*)values;// = 0;
+	float* ny    = (float*)&nx[blockDim.x];// = 0;
+	float* denom = (float*)&ny[blockDim.x];// = 0;
+	//because of multiple share blocks, we do an atomic add instead of the reduce method
+	nx[tid] = 0.0;
+	ny[tid] = 0.0;
+	denom[tid] = 0.0;
 	for (int i = tid; i < srf->nObjs; i+=step)
 	{
 		float area = cfg[i].length * cfg[i].width;
@@ -209,6 +210,9 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 		ny[tid] += area * cfg[i].y;
 		denom[tid] += area;
 	}
+	//atomicAdd(&nx, tnx);
+	//atomicAdd(&ny, tny);
+	//atomicAdd(&tdenom, denom);
 	__syncthreads();
 	reduce(nx, step);
 	reduce(ny, step);
@@ -543,8 +547,8 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	costs->OffLimitsCosts = offlimitsCosts;
 
-	float clearanceCosts = 0;
-	//float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
+	//float clearanceCosts = 0;
+	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
 	costs->ClearanceCosts = clearanceCosts;
 
@@ -800,15 +804,18 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	// Initialize current configuration to global memory
 	__shared__ positionAndRotation* cfgCurrent;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	__shared__ positionAndRotation* cfgStar;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
+	__shared__ positionAndRotation* cfgBest;
 	__shared__ resultCosts* starCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
 	__shared__ resultCosts* currentCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
+	__shared__ resultCosts* bestCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
 	__shared__ bool accept;
-	__syncthreads();
 	if (gtid == 0) { //This means that we only have one malloc a group, and that is written to the shared variable
 		cfgCurrent   = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 		cfgStar      = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 		starCosts    = (resultCosts*)malloc(sizeof(resultCosts));
 		currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
+		cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
+		bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
 	}
 	__syncthreads();
 	// Copy from result(previous)
@@ -827,13 +834,13 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		cfgCurrent[i].width = p[index].width;
 	}
 	// Copy(cfgCurrent, cfg, srf);
-	
+	__syncthreads();
 	Costs(srf, currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
 	
 	//positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-	//Copy(cfgBest, cfgCurrent, srf);
+	Copy(cfgBest, cfgCurrent, srf);
 	//resultCosts* bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
-	//CopyCosts(currentCosts, bestCosts);
+	CopyCosts(currentCosts, bestCosts);
 	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 
 	for (int i = 0; i < gpuCfg->iterations; i++)
@@ -851,7 +858,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 			printf("Star values after Copy, before proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 		}*/
 		// cfgStar contains an array with translated objects
-		__syncthreads();
+		//__syncthreads(); //Copy has a sync, so not needed
 		if (gtid == 0) {
 			propose(srf, cfgStar, surfaceRectangle, rngStates, tid);
 		}
@@ -865,15 +872,15 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		// printf("Cost star configuration: %f\n", starCosts->totalCosts);
 		// printf("Cost best configuration: %f\n", bestCosts->totalCosts);
 		// star has a better cost function than best cost, star is the new best
-		//if (starCosts->totalCosts < bestCosts->totalCosts)
-		//{
+		if (starCosts->totalCosts < bestCosts->totalCosts)
+		{
 			//printf("New best %f\n", bestCosts->totalCosts);
 
 			// Copy star into best for storage
-			//	Copy(cfgBest, cfgStar, srf);
-			//	CopyCosts(starCosts, bestCosts);
+				Copy(cfgBest, cfgStar, srf);
+				CopyCosts(starCosts, bestCosts);
 			//printf("Threadblock: %d, New costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-		//	}
+			}
 
 		// Check whether we continue with current or we continue with star
 		__syncthreads();
@@ -899,27 +906,27 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	{
 		// BlockId counts from 0, so to properly multiply
 		int index = blockIdx.x * srf->nObjs + i;
-		p[index].x = cfgCurrent[i].x;
-		p[index].y = cfgCurrent[i].y;
-		p[index].z = cfgCurrent[i].z;
-		p[index].rotX = cfgCurrent[i].rotX;
-		p[index].rotY = cfgCurrent[i].rotY;
-		p[index].rotZ = cfgCurrent[i].rotZ;
-		p[index].frozen = cfgCurrent[i].frozen;
-		p[index].length = cfgCurrent[i].length;
-		p[index].width = cfgCurrent[i].width;
+		p[index].x = cfgBest[i].x;
+		p[index].y = cfgBest[i].y;
+		p[index].z = cfgBest[i].z;
+		p[index].rotX = cfgBest[i].rotX;
+		p[index].rotY = cfgBest[i].rotY;
+		p[index].rotZ = cfgBest[i].rotZ;
+		p[index].frozen = cfgBest[i].frozen;
+		p[index].length = cfgBest[i].length;
+		p[index].width = cfgBest[i].width;
 	}
 	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	resultCostsArray[blockIdx.x].totalCosts = currentCosts->totalCosts;
-	resultCostsArray[blockIdx.x].PairWiseCosts = currentCosts->PairWiseCosts;
-	resultCostsArray[blockIdx.x].VisualBalanceCosts = currentCosts->VisualBalanceCosts;
-	resultCostsArray[blockIdx.x].FocalPointCosts = currentCosts->FocalPointCosts;
-	resultCostsArray[blockIdx.x].SymmetryCosts = currentCosts->SymmetryCosts;
+	resultCostsArray[blockIdx.x].totalCosts = bestCosts->totalCosts;
+	resultCostsArray[blockIdx.x].PairWiseCosts = bestCosts->PairWiseCosts;
+	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts->VisualBalanceCosts;
+	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts->FocalPointCosts;
+	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts->SymmetryCosts;
 	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
-	resultCostsArray[blockIdx.x].SurfaceAreaCosts = currentCosts->SurfaceAreaCosts;
+	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts->SurfaceAreaCosts;
 	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
-	resultCostsArray[blockIdx.x].ClearanceCosts = currentCosts->ClearanceCosts;
-	resultCostsArray[blockIdx.x].OffLimitsCosts = currentCosts->OffLimitsCosts;
+	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts->ClearanceCosts;
+	resultCostsArray[blockIdx.x].OffLimitsCosts = bestCosts->OffLimitsCosts;
 	
 	__syncthreads();
 	if (gtid == 0) {
@@ -927,6 +934,8 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		free(currentCosts);
 		free(cfgStar);
 		free(starCosts);
+		free(cfgBest);
+		free(bestCosts);
 	}
 	//free(cfgBest);
 	//free(bestCosts);
@@ -1001,7 +1010,8 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim, gpuCfg->blockxDim * sizeof(float) >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	//we make the dynamic memory 3 times because we have at least 3 arrays that use it in one function
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim, 3*gpuCfg->blockxDim * sizeof(float) >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
