@@ -109,6 +109,8 @@
     <CudaCompile>
       <Runtime>MTd</Runtime>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <GPUDebugInfo Condition="'$(Configuration)|$(Platform)'=='Kernel Release|x64'">true</GPUDebugInfo>
+      <GenerateLineInfo Condition="'$(Configuration)|$(Platform)'=='Kernel Release|x64'">true</GenerateLineInfo>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
