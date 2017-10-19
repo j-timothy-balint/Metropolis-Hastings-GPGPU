@@ -653,12 +653,21 @@ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid
 
 __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
 {
+	int gid = tid;
 	/*for (int j = 0; j < srf->nObjs; j++)
 	{
 		printf("Star values inside proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 	}*/
-	int p = generateRandomIntInRange(rngStates, tid, 2, 0);
-
+	__shared__ int p;
+	__shared__ bool found;
+	__shared__ int obj1;
+	__shared__ int obj2;
+	if (gid == 0) {
+		found = false;
+		p = generateRandomIntInRange(rngStates, tid, 2, 0);
+		obj1 = -1;
+		obj2 = -1;
+	}
 	// Determine width and length of surface rectangle
 	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
 	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
@@ -672,46 +681,48 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 	// Translate location using normal distribution
 	if (p == 0)
 	{
-		bool found = false;
+		//bool found = false;
 		int obj = -1;
 		// Take 100 tries to find a random nonfrozen object
-		for (int i = 0; i < 100; i++) {
-			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			if (!cfgStar[obj].frozen) {
-				found = true;
-				break;
-			}
+		//for (int i = 0; i < 100 && !found; i++) {
+		obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+		if (!cfgStar[obj].frozen) {//race condition, so it's generally the last good found one
+			found = true;
+			obj1 = obj;
 		}
+		//}
 		if (!found) {
 			return;
 		}
 
 		//printf("Selected object #: %d\n", obj);
-		float dx = curand_normal(&rngStates[tid]);
-		dx = dx * stdXAxis;
-		//printf("dx: %f\n", dx);
-		float dy = curand_normal(&rngStates[tid]);
-		dy = dy * stdYAxis;
-		// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
+		if (gid == 0) {
+			float dx = curand_normal(&rngStates[tid]);
+			dx = dx * stdXAxis;
+			//printf("dx: %f\n", dx);
+			float dy = curand_normal(&rngStates[tid]);
+			dy = dy * stdYAxis;
+			// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 
-		// When object exceeds surfacearea, snap it back.
-		if (cfgStar[obj].x + dx > srfRect1Max.x) {
-			cfgStar[obj].x = srfRect1Max.x;
-		}
-		else if (cfgStar[obj].x + dx < srfRect1Min.x) {
-			cfgStar[obj].x = srfRect1Min.x;
-		}
-		else {
-			cfgStar[obj].x += dx;
-		}
-		if (cfgStar[obj].y + dy > srfRect1Max.y) {
-			cfgStar[obj].y = srfRect1Max.y;
-		}
-		else if (cfgStar[obj].y + dy < srfRect1Min.y) {
-			cfgStar[obj].y = srfRect1Min.y;
-		}
-		else {
-			cfgStar[obj].y += dy;
+			// When object exceeds surfacearea, snap it back.
+			if (cfgStar[obj1].x + dx > srfRect1Max.x) {
+				cfgStar[obj1].x = srfRect1Max.x;
+			}
+			else if (cfgStar[obj1].x + dx < srfRect1Min.x) {
+				cfgStar[obj1].x = srfRect1Min.x;
+			}
+			else {
+				cfgStar[obj1].x += dx;
+			}
+			if (cfgStar[obj1].y + dy > srfRect1Max.y) {
+				cfgStar[obj1].y = srfRect1Max.y;
+			}
+			else if (cfgStar[obj1].y + dy < srfRect1Min.y) {
+				cfgStar[obj1].y = srfRect1Min.y;
+			}
+			else {
+				cfgStar[obj1].y += dy;
+			}
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
@@ -719,32 +730,34 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 	else if (p == 1)
 	{
 		int obj = -1;
-		bool found = false;
+		//bool found = false;
 
 		// Take 100 tries to find a random nonfrozen object
-		for (int i = 0; i < 100; i++) {
-			obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			if (!cfgStar[obj].frozen) {
-				found = true;
-				break;
-			}
+		//for (int i = 0; i < 100 && !found; i++) {
+		obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+		if (!cfgStar[obj].frozen) {
+			found = true;
+			obj1 = obj;
 		}
+		//}
 		if (!found) {
 			return;
 		}
-		// printf("Selected object #: %d\n", obj);
-		// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
-		float dRot = curand_normal(&rngStates[tid]);
-		dRot = dRot * S_SIGMA_T;
-		// printf("dRot: %f\n", dRot);
-		// printf("before rotation: %f\n", cfgStar[obj].rotY);
-		cfgStar[obj].rotY += dRot;
-		// printf("After rotation: %f\n", cfgStar[obj].rotY);
-		
-		if (cfgStar[obj].rotY < 0)
-			cfgStar[obj].rotY += 2 * PI;
-		else if (cfgStar[obj].rotY > 2 * PI)
-			cfgStar[obj].rotY -= 2 * PI;
+		if (gid == 0) {
+			// printf("Selected object #: %d\n", obj);
+			// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
+			float dRot = curand_normal(&rngStates[tid]);
+			dRot = dRot * S_SIGMA_T;
+			// printf("dRot: %f\n", dRot);
+			// printf("before rotation: %f\n", cfgStar[obj].rotY);
+			cfgStar[obj1].rotY += dRot;
+			// printf("After rotation: %f\n", cfgStar[obj].rotY);
+
+			if (cfgStar[obj1].rotY < 0)
+				cfgStar[obj1].rotY += 2 * PI;
+			else if (cfgStar[obj1].rotY > 2 * PI)
+				cfgStar[obj1].rotY -= 2 * PI;
+		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
 	// Swap two objects for both location and rotation
@@ -754,32 +767,31 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 			return;
 		}
 		// This can result in the same object, chance becomes increasingly smaller given more objects
-		int obj1 = -1;
-		bool found = false;
+		int obj_first = -1;
 
 		// Take 100 tries to find a random nonfrozen object
-		for (int i = 0; i < 100; i++) {
-			obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			if (!cfgStar[obj1].frozen) {
-				found = true;
-				break;
-			}
+		//for (int i = 0; i < 100 && !found; i++) {
+		obj_first = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+		if (!cfgStar[obj_first].frozen) {
+			found = true;
+			obj1 = obj_first;
 		}
+		//}
 		if (!found) {
 			return;
 		}
 
-		int obj2 = -1;
+		int obj_second = -1;
 		found = false;
 
 		// Take 100 tries to find a random nonfrozen object
-		for (int i = 0; i < 100; i++) {
-			obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-			if (!cfgStar[obj2].frozen) {
-				found = true;
-				break;
-			}
+		//for (int i = 0; i < 100 && !found; i++) {
+		obj_second = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+		if (!cfgStar[obj_second].frozen) {
+			found = true;
+			obj2 = obj_second;
 		}
+		//}
 		if (!found) {
 			return;
 		}
@@ -788,34 +800,35 @@ __device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * sur
 
 		// printf("Values, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
 		// printf("Values of, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
+		if (gid == 0) {
+			// Temporarily store cfgStar[obj1] values
+			float x = cfgStar[obj1].x;
+			float y = cfgStar[obj1].y;
+			float z = cfgStar[obj1].z;
+			float rotX = cfgStar[obj1].rotX;
+			float rotY = cfgStar[obj1].rotY;
+			float rotZ = cfgStar[obj1].rotZ;
+			// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
+			// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
-		// Temporarily store cfgStar[obj1] values
-		float x = cfgStar[obj1].x;
-		float y = cfgStar[obj1].y;
-		float z = cfgStar[obj1].z;
-		float rotX = cfgStar[obj1].rotX;
-		float rotY = cfgStar[obj1].rotY;
-		float rotZ = cfgStar[obj1].rotZ;
-		// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
-		// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
+			// Move values of obj2 to obj1
+			cfgStar[obj1].x = cfgStar[obj2].x;
+			cfgStar[obj1].y = cfgStar[obj2].y;
+			cfgStar[obj1].z = cfgStar[obj2].z;
+			cfgStar[obj1].rotX = cfgStar[obj2].rotX;
+			cfgStar[obj1].rotY = cfgStar[obj2].rotY;
+			cfgStar[obj1].rotZ = cfgStar[obj2].rotZ;
+			// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
+			// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
-		// Move values of obj2 to obj1
-		cfgStar[obj1].x = cfgStar[obj2].x;
-		cfgStar[obj1].y = cfgStar[obj2].y;
-		cfgStar[obj1].z = cfgStar[obj2].z;
-		cfgStar[obj1].rotX = cfgStar[obj2].rotX;
-		cfgStar[obj1].rotY = cfgStar[obj2].rotY;
-		cfgStar[obj1].rotZ = cfgStar[obj2].rotZ;
-		// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
-		// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
-
-		// Move stored values of obj1 to obj2
-		cfgStar[obj2].x = x;
-		cfgStar[obj2].y = y;
-		cfgStar[obj2].z = z;
-		cfgStar[obj2].rotX = rotX;
-		cfgStar[obj2].rotY = rotY;
-		cfgStar[obj2].rotZ = rotZ;
+			// Move stored values of obj1 to obj2
+			cfgStar[obj2].x = x;
+			cfgStar[obj2].y = y;
+			cfgStar[obj2].z = z;
+			cfgStar[obj2].rotX = rotX;
+			cfgStar[obj2].rotY = rotY;
+			cfgStar[obj2].rotZ = rotZ;
+		}
 		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
 		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 	}
@@ -928,11 +941,9 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 			printf("Star values after Copy, before proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 		}*/
 		// cfgStar contains an array with translated objects
-		//__syncthreads(); //Copy has a sync, so not needed
-		if (gtid == 0) {
-			propose(srf, cfgStar, surfaceRectangle, rngStates, tid);
-		}
-		__syncthreads();
+		
+		propose(srf, cfgStar, surfaceRectangle, rngStates, tid);
+		__syncthreads(); //Copy has a sync, so not needed
 		/* for (int j = 0; j < srf->nObjs; j++)
 		{
 			printf("Star values after proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
@@ -1172,7 +1183,7 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 1000;//What they claimed in the paper
+	gpuCfg.iterations = 1000;//a 10th of what they claimed in the paper
 
 	vertex surfaceRectangle[4];
 	surfaceRectangle[0].x = 10;
