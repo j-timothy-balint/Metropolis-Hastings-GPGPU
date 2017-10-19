@@ -38,6 +38,8 @@
 #define S_SIGMA_P (0.8)
 #define S_SIGMA_T (15.0 / 90.0 * PI)
 
+//In the original implementation, number of threads in a group was set to the WARP size, which we can do with 32
+#define WARP_SIZE 32
 
 
 struct vertex
@@ -185,20 +187,15 @@ __device__ void reduce(float *values, int n) { //Size of the array (from how we 
 		__syncthreads();
 		//local variable per thread, so no race condition
 	}
-	//if (tid == 0) {
-	//	printf("\n");
-	//}
-	//__syncthreads();
 }
 
 __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 {
 	int tid = threadIdx.x;
 	int step = blockDim.x;
-	extern __shared__ float values[];
-	float* nx    = (float*)values;// = 0;
-	float* ny    = (float*)&nx[blockDim.x];// = 0;
-	float* denom = (float*)&ny[blockDim.x];// = 0;
+	__shared__ float nx[WARP_SIZE];// = 0;
+	__shared__ float ny[WARP_SIZE];// = 0;
+	__shared__ float denom[WARP_SIZE];// = 0;
 	//because of multiple share blocks, we do an atomic add instead of the reduce method
 	nx[tid] = 0.0;
 	ny[tid] = 0.0;
@@ -223,10 +220,11 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 
 __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
-	extern __shared__ float values[];
+	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
+	int step = blockDim.x;
 	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = 0; i < srf->nRelationships; i++)
+	for (int i = 0; i < srf->nRelationships; i+=step)
 	{
 		// Look up source index from relationship and retrieve object using that index.
 		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
@@ -243,6 +241,9 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 			double fraction = rs[i].TargetRange.targetRangeEnd / distance;
 			values[tid] -= (fraction * fraction);
 		}
+		else {
+			values[tid] -= 1;
+		}
 		// Else don't do anything as 0 indicates a perfect solution
 	}
 	__syncthreads();
@@ -253,7 +254,7 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 
 __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
 {
-	extern __shared__ float values[];
+	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
 	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += blockDim.x)
@@ -277,7 +278,7 @@ __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
 
 __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 {
-	extern __shared__ float values[];
+	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
 	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += blockDim.x)
@@ -403,15 +404,16 @@ __device__ vertex maxValue(vertex *vertices, int startIndexVertices, float xtran
 __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits)
 {
 	//printf("Clearance cost calculation\n");
-	extern __shared__ float values[];
+	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
+	int step = blockDim.x;
 	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int j = tid; j < srf->nObjs; j += blockDim.x) {
-		vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-		vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-		for (int i = 0; i < srf->nClearances; i++) {
-			vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-			vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+	for (int i = tid; i < srf->nClearances; i+=step) {
+		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		for (int j = tid; j < srf->nObjs; j += blockDim.x) {
+			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
+			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 			// Determine max and min vectors of clearance rectangles
 			// rectangle #1
 			//printf("Clearance\n");
@@ -436,8 +438,9 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle) {
 	//printf("Surface cost calculation\n");
 
-	extern __shared__ float values[];
+	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
+	int step = blockDim.x;
 	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 						// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
 	vertex complementRectangle1[2];
@@ -451,11 +454,14 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 
 	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle1, complementRectangle2, complementRectangle3, complementRectangle4);
 
-	for (int i = tid; i < srf->nClearances; i += blockDim.x) {
+	for (int i = tid; i < srf->nClearances; i += step) {
 		// Determine max and min vectors of clearance rectangles
 		// rectangle #1
-		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
-		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
+		//Old way of doing things through a memory error
+		//vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
+		//vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
+		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 
@@ -467,9 +473,10 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
 
-	for (int j = tid; j < srf->nObjs; j += blockDim.x) {
+	for (int j = tid; j < srf->nObjs; j += step) {
 		// Determine max and min vectors of off limit rectangles
 		// rectangle #1
+		//offlimits is the size of cfg
 		vertex rect1Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
@@ -487,10 +494,11 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 }
 
 __device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *vertices, rectangle *offlimits) {
-	extern __shared__ float values[];
+	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
+	int step = blockDim.x;
 	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nObjs; i += blockDim.x) {
+	for (int i = tid; i < srf->nObjs; i += step) {
 		vertex rect1Min = minValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
 		vertex rect1Max = maxValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
 		for (int j = i + 1; j < srf->nObjs; j++) {
@@ -502,6 +510,7 @@ __device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *
 			// rectangle #2
 			//printf("Off limits\n");
 			//printf("Translation: X: %f Y: %f\n", cfg[j].x, cfg[j].y);
+			//offlimits is the size of cfg
 			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
@@ -552,8 +561,8 @@ __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
 	costs->ClearanceCosts = clearanceCosts;
 
-	float surfaceAreaCosts = 0;
-	//float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
+	//float surfaceAreaCosts = 0;
+	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	costs->SurfaceAreaCosts = surfaceAreaCosts;
 
@@ -769,7 +778,8 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 __device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surface* srf) 
 {
 	int breakup = blockDim.x;
-	for (unsigned int i = threadIdx.x; i < srf->nObjs; i += breakup)
+	int tid = threadIdx.x;
+	for (unsigned int i = tid; i < srf->nObjs; i += breakup)
 	{
 		cfg1[i].x = cfg2[i].x;
 		cfg1[i].y = cfg2[i].y;
@@ -802,20 +812,22 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 
 
 	// Initialize current configuration to global memory
+	//extern __shared__ int all_memory[];
 	__shared__ positionAndRotation* cfgCurrent;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	__shared__ positionAndRotation* cfgStar;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	__shared__ positionAndRotation* cfgBest;
-	__shared__ resultCosts* starCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
-	__shared__ resultCosts* currentCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
-	__shared__ resultCosts* bestCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
+	//No need to put resultCosts in global memory for one warp size
+	__shared__ resultCosts starCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
+	__shared__ resultCosts currentCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
+	__shared__ resultCosts bestCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
 	__shared__ bool accept;
 	if (gtid == 0) { //This means that we only have one malloc a group, and that is written to the shared variable
 		cfgCurrent   = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 		cfgStar      = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-		starCosts    = (resultCosts*)malloc(sizeof(resultCosts));
-		currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
+		//starCosts    = (resultCosts*)malloc(sizeof(resultCosts));
+		//currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
 		cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-		bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
+		//bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
 	}
 	__syncthreads();
 	// Copy from result(previous)
@@ -835,12 +847,12 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 	}
 	// Copy(cfgCurrent, cfg, srf);
 	__syncthreads();
-	Costs(srf, currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
+	Costs(srf, &currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
 	
 	//positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	Copy(cfgBest, cfgCurrent, srf);
 	//resultCosts* bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
-	CopyCosts(currentCosts, bestCosts);
+	CopyCosts(&currentCosts, &bestCosts);
 	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 
 	for (int i = 0; i < gpuCfg->iterations; i++)
@@ -868,24 +880,24 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 			printf("Star values after proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 		} */
 
-		Costs(srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
+		Costs(srf, &starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
 		// printf("Cost star configuration: %f\n", starCosts->totalCosts);
 		// printf("Cost best configuration: %f\n", bestCosts->totalCosts);
 		// star has a better cost function than best cost, star is the new best
-		if (starCosts->totalCosts < bestCosts->totalCosts)
+		if (starCosts.totalCosts < bestCosts.totalCosts)
 		{
 			//printf("New best %f\n", bestCosts->totalCosts);
 
 			// Copy star into best for storage
 				Copy(cfgBest, cfgStar, srf);
-				CopyCosts(starCosts, bestCosts);
+				CopyCosts(&starCosts, &bestCosts);
 			//printf("Threadblock: %d, New costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 			}
 
 		// Check whether we continue with current or we continue with star
 		__syncthreads();
 		if (gtid == 0) {
-			accept = Accept(starCosts->totalCosts, currentCosts->totalCosts, rngStates, tid);
+			accept = Accept(starCosts.totalCosts, currentCosts.totalCosts, rngStates, tid);
 		}
 		__syncthreads();
 		if (accept)
@@ -894,7 +906,7 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 			//printf("Star accepted as new current.\n");
 			// Copy star into current
 			Copy(cfgCurrent, cfgStar, srf);
-			CopyCosts(starCosts, currentCosts);
+			CopyCosts(&starCosts, &currentCosts);
 		}
 
 	}
@@ -917,25 +929,25 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 		p[index].width = cfgBest[i].width;
 	}
 	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	resultCostsArray[blockIdx.x].totalCosts = bestCosts->totalCosts;
-	resultCostsArray[blockIdx.x].PairWiseCosts = bestCosts->PairWiseCosts;
-	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts->VisualBalanceCosts;
-	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts->FocalPointCosts;
-	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts->SymmetryCosts;
+	resultCostsArray[blockIdx.x].totalCosts = bestCosts.totalCosts;
+	resultCostsArray[blockIdx.x].PairWiseCosts = bestCosts.PairWiseCosts;
+	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts.VisualBalanceCosts;
+	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts.FocalPointCosts;
+	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts.SymmetryCosts;
 	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
-	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts->SurfaceAreaCosts;
+	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts.SurfaceAreaCosts;
 	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
-	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts->ClearanceCosts;
-	resultCostsArray[blockIdx.x].OffLimitsCosts = bestCosts->OffLimitsCosts;
+	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts.ClearanceCosts;
+	resultCostsArray[blockIdx.x].OffLimitsCosts = bestCosts.OffLimitsCosts;
 	
 	__syncthreads();
 	if (gtid == 0) {
 		free(cfgCurrent);
-		free(currentCosts);
+		//free(currentCosts);
 		free(cfgStar);
-		free(starCosts);
+		//free(starCosts);
 		free(cfgBest);
-		free(bestCosts);
+		//free(bestCosts);
 	}
 	//free(cfgBest);
 	//free(bestCosts);
@@ -996,13 +1008,14 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	checkCudaErrors(cudaMalloc((void**)&gpuResultCosts, resultCostsSize));
 
 	// cudaMemcpy(gpuPointArray, result, pointArraySize, cudaMemcpyHostToDevice);
-
+	//Size of the shared array that holds the configuration data
+	int share_size = 3 * sizeof(resultCosts) + 3 * sizeof(positionAndRotation);
 	// Setup GPU random generator
 	curandState *d_rngStates = 0;
 	checkCudaErrors(cudaMalloc((void **)&d_rngStates, gpuCfg->gridxDim * gpuCfg->blockxDim * sizeof(curandState)));
 
 	// Initialise random number generator
-	initRNG <<<gpuCfg->gridxDim, gpuCfg->blockxDim, gpuCfg->blockxDim * sizeof(float) >> > (d_rngStates, time(NULL));
+	initRNG <<<gpuCfg->gridxDim, gpuCfg->blockxDim>> > (d_rngStates, time(NULL));
 
 	// Commented for possible later usage
 	// dim3 dimGrid(gpuCfg->gridxDim, gpuCfg->gridyDim);
@@ -1011,7 +1024,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
 	//we make the dynamic memory 3 times because we have at least 3 arrays that use it in one function
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim, 3*gpuCfg->blockxDim * sizeof(float) >>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim, share_size>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -1091,13 +1104,13 @@ int main(int argc, char **argv)
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
 
-	const int dimensions = 5;
+	const int dimensions = 8;
 
 	gpuConfig gpuCfg;
 
 	gpuCfg.gridxDim = dimensions;
 	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = 8;
+	gpuCfg.blockxDim = WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
 	gpuCfg.iterations = 500;
