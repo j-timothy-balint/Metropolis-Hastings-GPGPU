@@ -86,6 +86,13 @@ struct relationshipStruct
 	double DegreesOfAtrraction;
 };
 
+struct relationshipAngleStruct {
+	double angleMin;
+	double angleMax;
+	int SourceIndex;
+	int TargetIndex;
+};
+
 struct Surface
 {
 	int nObjs;
@@ -164,7 +171,22 @@ __device__ double Distance(float xi, float yi, float xj, float yj)
 	return sqrt(dX * dX + dY * dY);
 }
 
-// Theta is the rotation
+//Determines the angular difference between two objects where i is oriented to j (i is bearing to j)
+__device__ double theta(float xi, float yi, float xj, float yj, float ti) {
+	double dX = xi - xj;
+	double dY = yi - yj;
+	double theta_p = atan2(dY, dX); //gives us the angle between -PI and PI
+
+									//and now between 0 and 2*pi
+	theta_p = (theta_p < 0) ? 2 * PI + theta_p : theta_p;
+	//printf("theta_p=%f,ti=%f\n",theta_p,ti);
+	//return the re-oriented angle
+	double theta = theta_p - ti;
+	return (theta < 0) ? 2 * PI + theta : theta;
+
+}
+
+// Tj is the rotation
 __device__ float phi(float xi, float yi, float xj, float yj, float tj)
 {
 	return atan2(yi - yj, xi - xj) - tj + PI / 2.0;
@@ -207,9 +229,6 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 		ny[tid] += area * cfg[i].y;
 		denom[tid] += area;
 	}
-	//atomicAdd(&nx, tnx);
-	//atomicAdd(&ny, tny);
-	//atomicAdd(&tdenom, denom);
 	__syncthreads();
 	reduce(nx, step);
 	reduce(ny, step);
@@ -250,6 +269,42 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 	reduce(values, blockDim.x);
 	//printf("Clearance costs error: %f\n", error);
 	return (double)values[0];
+}
+
+//This functional principle uses a lookup (relationshipStruct) to determine weights from a recommended angle
+//This is not the facing angle but the distance angle (so, the target rotated around the source)
+__device__ double PairWiseAngleCosts(Surface *srf, positionAndRotation* cfg, relationshipAngleStruct *rs)
+{
+	__shared__ float values[WARP_SIZE];
+	int tid = threadIdx.x;
+	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+						//assuming (0,2*PI]
+	for (int i = tid; i < srf->nRelationships; i += blockDim.x)
+	{
+		// We use phi to calculate the angle between the rotation of the object and the target object
+		double distance = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y, cfg[rs[i].TargetIndex].rotY);
+		//printf("dist is %f, angle is %f\n",distance,cfg[rs[i].TargetIndex].rotY);
+		if (rs[i].angleMin > rs[i].angleMax) {
+			double norm = (2 * PI - (rs[i].angleMax + (2 * PI - rs[i].angleMin))) / 2.0;
+			//In this case, we need to determine a slightly different range because we are crossing the zero boundary
+			if (fmodf(rs[i].angleMin + distance, 2 * PI) > rs[i].angleMax)
+				values[tid] -= fmin(fabs(distance - rs[i].angleMin), fabs(distance - rs[i].angleMax)) / norm; //Calculate the closest angular difference (un-normalized for now)
+		}
+		else if (rs[i].angleMin < distance || distance < rs[i].angleMax) {
+			double norm = (2 * PI - (rs[i].angleMax - rs[i].angleMin)) / 2.0; //The max distance away is half the slice that is in the no zone 
+			values[tid] -= fmin(fabs(distance - rs[i].angleMin), fabs(distance - rs[i].angleMax)) / norm; //Calculate the closest angular difference (un-normalized for now)
+		}
+		//Stick to zero as the perfect solution
+		//by doing percent error as an absolute value, we can go around the circle. Whichever bound is closer to is the one we want
+		//result -= 1.0f - fmaxf( 
+		//				       fabsf((distance - rs[i].angleMin)/rs[i].angleMin), 
+		//					   fabsf((distance - rs[i].angleMax)/rs[i].angleMax)
+		//					   );
+	}
+	__syncthreads();
+	reduce(values, blockDim.x);
+	//printf("Clearance costs error: %f\n", error);
+	return values[0];
 }
 
 __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
@@ -812,7 +867,10 @@ __global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStru
 
 
 	// Initialize current configuration to global memory
-	//extern __shared__ int all_memory[];
+	//extern __shared__ positionAndRotation all_memory[];
+	//positionAndRotation* cfgCurrent = all_memory;
+	//positionAndRotation* cfgStar = &cfgCurrent[srf->nObjs];
+	//positionAndRotation* cfgBest = &cfgStar[srf->nObjs];
 	__shared__ positionAndRotation* cfgCurrent;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	__shared__ positionAndRotation* cfgStar;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
 	__shared__ positionAndRotation* cfgBest;
@@ -1009,7 +1067,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 
 	// cudaMemcpy(gpuPointArray, result, pointArraySize, cudaMemcpyHostToDevice);
 	//Size of the shared array that holds the configuration data
-	int share_size = 3 * sizeof(resultCosts) + 3 * sizeof(positionAndRotation);
+	
 	// Setup GPU random generator
 	curandState *d_rngStates = 0;
 	checkCudaErrors(cudaMalloc((void **)&d_rngStates, gpuCfg->gridxDim * gpuCfg->blockxDim * sizeof(curandState)));
@@ -1024,7 +1082,8 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
 	//we make the dynamic memory 3 times because we have at least 3 arrays that use it in one function
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim, share_size>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	//int share_size = 3 * srf->nObjs * sizeof(positionAndRotation);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -1113,7 +1172,7 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 10000;//What they claimed in the paper
+	gpuCfg.iterations = 1000;//What they claimed in the paper
 
 	vertex surfaceRectangle[4];
 	surfaceRectangle[0].x = 10;
