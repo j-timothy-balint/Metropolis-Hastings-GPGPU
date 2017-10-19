@@ -215,7 +215,7 @@ __device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
 	reduce(ny, step);
 	reduce(denom, step);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
-	return -1.0 * Distance(nx[0] / denom[0], ny[0] / denom[0], srf->centroidX / 2, srf->centroidY / 2);
+	return  Distance(nx[0] / denom[0], ny[0] / denom[0], srf->centroidX / 2, srf->centroidY / 2);
 }
 
 __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
@@ -1113,7 +1113,7 @@ int main(int argc, char **argv)
 	gpuCfg.blockxDim = WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
-	gpuCfg.iterations = 500;
+	gpuCfg.iterations = 10000;//What they claimed in the paper
 
 	vertex surfaceRectangle[4];
 	surfaceRectangle[0].x = 10;
