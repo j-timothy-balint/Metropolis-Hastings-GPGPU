@@ -81,16 +81,10 @@ struct targetRangeStruct {
 struct relationshipStruct
 {
 	targetRangeStruct TargetRange;
+	targetRangeStruct AngleRange;
 	int SourceIndex;
 	int TargetIndex;
 	double DegreesOfAtrraction;
-};
-
-struct relationshipAngleStruct {
-	double angleMin;
-	double angleMax;
-	int SourceIndex;
-	int TargetIndex;
 };
 
 struct Surface
@@ -273,7 +267,7 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 
 //This functional principle uses a lookup (relationshipStruct) to determine weights from a recommended angle
 //This is not the facing angle but the distance angle (so, the target rotated around the source)
-__device__ double PairWiseAngleCosts(Surface *srf, positionAndRotation* cfg, relationshipAngleStruct *rs)
+__device__ double PairWiseTotalCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
 	__shared__ float values[WARP_SIZE];
 	int tid = threadIdx.x;
@@ -282,24 +276,20 @@ __device__ double PairWiseAngleCosts(Surface *srf, positionAndRotation* cfg, rel
 	for (int i = tid; i < srf->nRelationships; i += blockDim.x)
 	{
 		// We use phi to calculate the angle between the rotation of the object and the target object
-		double distance = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y, cfg[rs[i].TargetIndex].rotY);
-		//printf("dist is %f, angle is %f\n",distance,cfg[rs[i].TargetIndex].rotY);
-		if (rs[i].angleMin > rs[i].angleMax) {
-			double norm = (2 * PI - (rs[i].angleMax + (2 * PI - rs[i].angleMin))) / 2.0;
-			//In this case, we need to determine a slightly different range because we are crossing the zero boundary
-			if (fmodf(rs[i].angleMin + distance, 2 * PI) > rs[i].angleMax)
-				values[tid] -= fmin(fabs(distance - rs[i].angleMin), fabs(distance - rs[i].angleMax)) / norm; //Calculate the closest angular difference (un-normalized for now)
-		}
-		else if (rs[i].angleMin < distance || distance < rs[i].angleMax) {
-			double norm = (2 * PI - (rs[i].angleMax - rs[i].angleMin)) / 2.0; //The max distance away is half the slice that is in the no zone 
-			values[tid] -= fmin(fabs(distance - rs[i].angleMin), fabs(distance - rs[i].angleMax)) / norm; //Calculate the closest angular difference (un-normalized for now)
-		}
-		//Stick to zero as the perfect solution
-		//by doing percent error as an absolute value, we can go around the circle. Whichever bound is closer to is the one we want
-		//result -= 1.0f - fmaxf( 
-		//				       fabsf((distance - rs[i].angleMin)/rs[i].angleMin), 
-		//					   fabsf((distance - rs[i].angleMax)/rs[i].angleMax)
-		//					   );
+		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
+		double angle = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y, cfg[rs[i].TargetIndex].rotY);
+		
+		//Score distance calculation
+		double score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
+		score        = (distance > rs[i].TargetRange.targetRangeEnd)   ? powf(rs[i].TargetRange.targetRangeEnd / distance  , rs[i].DegreesOfAtrraction)  : 1.0;
+
+		//For now, we assume start is greater than end
+		double norm    = (rs[i].TargetRange.targetRangeStart < rs[i].TargetRange.targetRangeEnd)? rs[i].AngleRange.targetRangeEnd - rs[i].AngleRange.targetRangeStart : 
+																								  rs[i].AngleRange.targetRangeStart - rs[i].AngleRange.targetRangeEnd; //The max distance away is half the slice that is in the no zone 
+		norm = (2.0 * PI - norm) / 2.0;
+		double a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(distance - rs[i].AngleRange.targetRangeStart), 
+																													 fabs(distance - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
+		values[tid] -= score*a_score; //So, best score we can do is -1, and everything else degrades from there
 	}
 	__syncthreads();
 	reduce(values, blockDim.x);
@@ -587,7 +577,7 @@ __device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *
 __device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
 	//float pairWiseCosts = 0;
-	float pairWiseCosts = srf->WeightPairWise * PairWiseCosts(srf, cfg, rs);
+	float pairWiseCosts = srf->WeightPairWise * PairWiseTotalCosts(srf, cfg, rs);
 	costs->PairWiseCosts = pairWiseCosts;
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 
@@ -1321,6 +1311,8 @@ int main(int argc, char **argv)
 	relationshipStruct rss[1];
 	rss[0].TargetRange.targetRangeStart = 2.0;
 	rss[0].TargetRange.targetRangeEnd = 4.0;
+	rss[0].AngleRange.targetRangeStart = 0.01*PI;
+	rss[0].AngleRange.targetRangeEnd = PI;
 	rss[0].DegreesOfAtrraction = 2.0;
 	rss[0].SourceIndex = 0;
 	rss[0].TargetIndex = 1;
