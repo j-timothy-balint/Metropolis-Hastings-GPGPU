@@ -425,7 +425,7 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
 			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
 			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-			values[tid] -= area;
+			values[tid] = area; //Clearence penalty should be positive
 		}
 	}
 	__syncthreads();
