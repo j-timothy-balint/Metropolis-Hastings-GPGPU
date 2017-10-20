@@ -238,9 +238,9 @@ __device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfa
 		denom += area;
 	}
 	group.sync();
-	reduce(group, nx);
-	reduce(group, ny);
-	reduce(group, denom);
+	reduce<tile_sz>(group, nx);
+	reduce<tile_sz>(group, ny);
+	reduce<tile_sz>(group, denom);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
 	return  Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2); //Because we are all reducing, all values should be the same
 }
@@ -275,7 +275,7 @@ __device__ double PairWiseCosts(cg::thread_block_tile<tile_sz> group,Surface *sr
 		// Else don't do anything as 0 indicates a perfect solution
 	}
 	group.sync();
-	reduce(group, values);
+	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return (double)values;
 }
@@ -332,7 +332,7 @@ __device__ double FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface 
 		values -= cos(phi_fi);
 	}
 	group.sync();
-	reduce(group, values);
+	reduce<tile_sz>(group, values);
 	//printf("tid = %d, value = %f\n", tid, values[tid]);
 	//printf("Clearance costs error: %f\n", error);
 	return (double)values;
@@ -343,7 +343,7 @@ __device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *sr
 {
 	int tid = group.thread_rank();
 	int step = group.size();
-	__shared__ float values;
+	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += step)
 	{
@@ -377,7 +377,7 @@ __device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *sr
 	}
 
 	group.sync();
-	reduce(group, values);
+	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -493,7 +493,7 @@ __device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 		}
 	}
 	group.sync();
-	reduce(group, values);
+	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -553,7 +553,7 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	}
 
 	group.sync();
-	reduce(group, values);
+	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -590,7 +590,7 @@ __device__ float OffLimitsCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 	}
 
 	group.sync();
-	reduce(group, values);
+	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -606,32 +606,32 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 
 	//float visualBalanceCosts = 0;
-	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(group, srf, cfg);
+	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts<tile_sz>(group, srf, cfg);
 	
 	// printf("Visual balance costs with weight %f\n", visualBalanceCosts);
 
 	//float focalPointCosts = 0;
-	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts(group, srf, cfg);
+	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts<tile_sz>(group, srf, cfg);
 	
 	// printf("Focal point costs with weight %f\n", focalPointCosts);
 
 	//float symmertryCosts = 0;
-	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(group, srf, cfg);
+	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts<tile_sz>(group, srf, cfg);
 	
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
 	//float offlimitsCosts = 0;
-	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(group, srf, cfg, vertices, offlimits);
+	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts<tile_sz>(group, srf, cfg, vertices, offlimits);
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	
 
 	//float clearanceCosts = 0;
-	float clearanceCosts = srf->WeightClearance * ClearanceCosts(group, srf, cfg, vertices, clearances, offlimits);
+	float clearanceCosts = srf->WeightClearance * ClearanceCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits);
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
 	
 
 	//float surfaceAreaCosts = 0;
-	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
+	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	
 	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + surfaceAreaCosts;
@@ -676,23 +676,19 @@ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid
 }
 
 template<int tile_sz>
-__device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfgStar, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
+__device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
 {
 	int gid = group.thread_rank();
 	/*for (int j = 0; j < srf->nObjs; j++)
 	{
 		printf("Star values inside proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 	}*/
-	__shared__ int p;
-	__shared__ bool found;
-	__shared__ int obj1;
-	__shared__ int obj2;
+	int p = - 1;
 	if (gid == 0) {
-		found = false;
 		p = generateRandomIntInRange(rngStates, tid, 2, 0);
-		obj1 = -1;
-		obj2 = -1;
 	}
+	p = group.shfl(p, 0); //broadcast out to p
+	group.sync();
 	// Determine width and length of surface rectangle
 	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
 	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
@@ -711,14 +707,13 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 		// Take 100 tries to find a random nonfrozen object
 		//for (int i = 0; i < 100 && !found; i++) {
 		obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!cfgStar[obj].frozen) {//race condition, so it's generally the last good found one
-			found = true;
-			obj1 = obj;
-		}
-		//}
-		if (!found) {
+		if (!group.any(!cfg[obj].frozen)) {
 			return;
 		}
+		int mask = group.ballot(!cfg[obj].frozen);
+		int leader = __ffs(mask);
+		obj = group.shfl(obj, leader);
+
 
 		//printf("Selected object #: %d\n", obj);
 		if (gid == 0) {
@@ -730,23 +725,23 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 			// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 
 			// When object exceeds surfacearea, snap it back.
-			if (cfgStar[obj1].x + dx > srfRect1Max.x) {
-				cfgStar[obj1].x = srfRect1Max.x;
+			if (cfg[obj].x + dx > srfRect1Max.x) {
+				cfg[obj].x = srfRect1Max.x;
 			}
-			else if (cfgStar[obj1].x + dx < srfRect1Min.x) {
-				cfgStar[obj1].x = srfRect1Min.x;
-			}
-			else {
-				cfgStar[obj1].x += dx;
-			}
-			if (cfgStar[obj1].y + dy > srfRect1Max.y) {
-				cfgStar[obj1].y = srfRect1Max.y;
-			}
-			else if (cfgStar[obj1].y + dy < srfRect1Min.y) {
-				cfgStar[obj1].y = srfRect1Min.y;
+			else if (cfg[obj].x + dx < srfRect1Min.x) {
+				cfg[obj].x = srfRect1Min.x;
 			}
 			else {
-				cfgStar[obj1].y += dy;
+				cfg[obj].x += dx;
+			}
+			if (cfg[obj].y + dy > srfRect1Max.y) {
+				cfg[obj].y = srfRect1Max.y;
+			}
+			else if (cfg[obj].y + dy < srfRect1Min.y) {
+				cfg[obj].y = srfRect1Min.y;
+			}
+			else {
+				cfg[obj].y += dy;
 			}
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
@@ -755,19 +750,17 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 	else if (p == 1)
 	{
 		int obj = -1;
-		//bool found = false;
-
 		// Take 100 tries to find a random nonfrozen object
 		//for (int i = 0; i < 100 && !found; i++) {
 		obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!cfgStar[obj].frozen) {
-			found = true;
-			obj1 = obj;
-		}
-		//}
-		if (!found) {
+		if (!group.any(!cfg[obj].frozen)) {
 			return;
 		}
+		int mask = group.ballot(!cfg[obj].frozen);
+		int leader = __ffs(mask);
+		obj = group.shfl(obj, leader);
+
+
 		if (gid == 0) {
 			// printf("Selected object #: %d\n", obj);
 			// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
@@ -775,13 +768,13 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 			dRot = dRot * S_SIGMA_T;
 			// printf("dRot: %f\n", dRot);
 			// printf("before rotation: %f\n", cfgStar[obj].rotY);
-			cfgStar[obj1].rotY += dRot;
+			cfg[obj].rotY += dRot;
 			// printf("After rotation: %f\n", cfgStar[obj].rotY);
 
-			if (cfgStar[obj1].rotY < 0)
-				cfgStar[obj1].rotY += 2 * PI;
-			else if (cfgStar[obj1].rotY > 2 * PI)
-				cfgStar[obj1].rotY -= 2 * PI;
+			if (cfg[obj].rotY < 0)
+				cfg[obj].rotY += 2 * PI;
+			else if (cfg[obj].rotY > 2 * PI)
+				cfg[obj].rotY -= 2 * PI;
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
@@ -792,33 +785,26 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 			return;
 		}
 		// This can result in the same object, chance becomes increasingly smaller given more objects
-		int obj_first = -1;
-
-		// Take 100 tries to find a random nonfrozen object
-		//for (int i = 0; i < 100 && !found; i++) {
-		obj_first = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!cfgStar[obj_first].frozen) {
-			found = true;
-			obj1 = obj_first;
-		}
-		//}
-		if (!found) {
+		int obj1 = -1;
+		int obj2 = -1;
+		obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+		if (!group.any(!cfg[obj1].frozen)) {
 			return;
 		}
+		int mask = group.ballot(!cfg[obj1].frozen);
+		int leader = __ffs(mask);
+		obj1 = group.shfl(obj1, leader);
 
-		int obj_second = -1;
-		found = false;
-
-		// Take 100 tries to find a random nonfrozen object
-		//for (int i = 0; i < 100 && !found; i++) {
-		obj_second = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!cfgStar[obj_second].frozen) {
-			found = true;
-			obj2 = obj_second;
-		}
-		//}
-		if (!found) {
+		obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
+		if (!group.any(!cfg[obj2].frozen)) {
 			return;
+		}
+		mask = group.ballot(!cfg[obj2].frozen);
+		leader = __ffs(mask);
+		obj2 = group.shfl(obj2, leader);
+
+		if (obj1 == obj2) {
+			return; //No point at this step
 		}
 		// printf("First selected object #: %d\n", obj1);
 		// printf("Second selected object #: %d\n", obj2);
@@ -827,32 +813,32 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 		// printf("Values of, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 		if (gid == 0) {
 			// Temporarily store cfgStar[obj1] values
-			float x = cfgStar[obj1].x;
-			float y = cfgStar[obj1].y;
-			float z = cfgStar[obj1].z;
-			float rotX = cfgStar[obj1].rotX;
-			float rotY = cfgStar[obj1].rotY;
-			float rotZ = cfgStar[obj1].rotZ;
+			float x = cfg[obj1].x;
+			float y = cfg[obj1].y;
+			float z = cfg[obj1].z;
+			float rotX = cfg[obj1].rotX;
+			float rotY = cfg[obj1].rotY;
+			float rotZ = cfg[obj1].rotZ;
 			// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
 			// printf("After copy obj1 to temp, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
 			// Move values of obj2 to obj1
-			cfgStar[obj1].x = cfgStar[obj2].x;
-			cfgStar[obj1].y = cfgStar[obj2].y;
-			cfgStar[obj1].z = cfgStar[obj2].z;
-			cfgStar[obj1].rotX = cfgStar[obj2].rotX;
-			cfgStar[obj1].rotY = cfgStar[obj2].rotY;
-			cfgStar[obj1].rotZ = cfgStar[obj2].rotZ;
+			cfg[obj1].x = cfg[obj2].x;
+			cfg[obj1].y = cfg[obj2].y;
+			cfg[obj1].z = cfg[obj2].z;
+			cfg[obj1].rotX = cfg[obj2].rotX;
+			cfg[obj1].rotY = cfg[obj2].rotY;
+			cfg[obj1].rotZ = cfg[obj2].rotZ;
 			// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
 			// printf("After copy obj2 into obj1, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
 
 			// Move stored values of obj1 to obj2
-			cfgStar[obj2].x = x;
-			cfgStar[obj2].y = y;
-			cfgStar[obj2].z = z;
-			cfgStar[obj2].rotX = rotX;
-			cfgStar[obj2].rotY = rotY;
-			cfgStar[obj2].rotZ = rotZ;
+			cfg[obj2].x = x;
+			cfg[obj2].y = y;
+			cfg[obj2].z = z;
+			cfg[obj2].rotX = rotX;
+			cfg[obj2].rotY = rotY;
+			cfg[obj2].rotZ = rotZ;
 		}
 		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
 		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
@@ -1190,7 +1176,7 @@ int main(int argc, char **argv)
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
 
-	const int dimensions = 1;
+	const int dimensions = 8;
 
 	gpuConfig gpuCfg;
 
