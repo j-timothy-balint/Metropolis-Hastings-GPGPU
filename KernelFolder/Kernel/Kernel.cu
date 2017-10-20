@@ -953,30 +953,53 @@ __device__ void copyToSharedMemory(cg::thread_block_tile<tile_sz> group,
 	}
 
 }
-//Helper function to copy the information from shared to global. This will change when we do the actual best
-template<int tile_sz>
-__device__ void copyToGlobalMemory(cg::thread_block_tile<tile_sz> group,
+//Helper function to copy the information from shared to global.
+__device__ void copyToGlobalMemory(
 	point *p,
 	Surface *srf,
-	positionAndRotation* configuration) {
-	int gid = group.thread_rank();
+	resultCosts* resultCostsArray,
+	positionAndRotation* configuration,
+	resultCosts* costs,
+	int lowest_cost) {
 	//Copy current config back into the global memory
 	// Copy best config (now set to input config) to result of this block
-	for (unsigned int i = gid; i < srf->nObjs; i += WARP_SIZE)
+	for (unsigned int i = threadIdx.x; i < srf->nObjs; i += blockDim.x)
 	{
 		// BlockId counts from 0, so to properly multiply
 		int index = blockIdx.x * srf->nObjs + i;
-		p[index].x = configuration[i].x;
-		p[index].y = configuration[i].y;
-		p[index].z = configuration[i].z;
-		p[index].rotX = configuration[i].rotX;
-		p[index].rotY = configuration[i].rotY;
-		p[index].rotZ = configuration[i].rotZ;
-		p[index].frozen = configuration[i].frozen;
-		p[index].length = configuration[i].length;
-		p[index].width = configuration[i].width;
+		p[index].x = configuration[lowest_cost * srf->nObjs + i].x;
+		p[index].y = configuration[lowest_cost * srf->nObjs + i].y;
+		p[index].z = configuration[lowest_cost * srf->nObjs + i].z;
+		p[index].rotX = configuration[lowest_cost * srf->nObjs + i].rotX;
+		p[index].rotY = configuration[lowest_cost * srf->nObjs + i].rotY;
+		p[index].rotZ = configuration[lowest_cost * srf->nObjs + i].rotZ;
+		p[index].frozen = configuration[lowest_cost * srf->nObjs + i].frozen;
+		p[index].length = configuration[lowest_cost * srf->nObjs + i].length;
+		p[index].width = configuration[lowest_cost * srf->nObjs + i].width;
 	}
+	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
+	resultCostsArray[blockIdx.x].totalCosts = costs[lowest_cost].totalCosts;
+	resultCostsArray[blockIdx.x].PairWiseCosts = costs[lowest_cost].PairWiseCosts;
+	resultCostsArray[blockIdx.x].VisualBalanceCosts = costs[lowest_cost].VisualBalanceCosts;
+	resultCostsArray[blockIdx.x].FocalPointCosts = costs[lowest_cost].FocalPointCosts;
+	resultCostsArray[blockIdx.x].SymmetryCosts = costs[lowest_cost].SymmetryCosts;
+	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
+	resultCostsArray[blockIdx.x].SurfaceAreaCosts = costs[lowest_cost].SurfaceAreaCosts;
+	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
+	resultCostsArray[blockIdx.x].ClearanceCosts = costs[lowest_cost].ClearanceCosts;
+	resultCostsArray[blockIdx.x].OffLimitsCosts = costs[lowest_cost].OffLimitsCosts;
 
+}
+
+//This function figures out the lowest cost of our search
+__device__ int lowestIndex(resultCosts* best_costs, int active_warps) {
+	int best_cost = 0;
+	for (int i = 0; i < active_warps; i++) {
+		if (best_costs[i].totalCosts < best_costs[best_cost].totalCosts) {
+			best_cost = i;
+		}
+	}
+	return best_cost;
 }
 // result is a [,] array with 1 dimension equal to the amount of blocks used and the other dimension equal to the amount of objects
 // rs is an array with the length equal to the amount of relationships
@@ -1006,19 +1029,8 @@ __global__ void Kernel(resultCosts* resultCostsArray,
 	copyToSharedMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
 	groupKernel<WARP_SIZE>(tile_warp,best_conf,best_cost,star_conf,star_cost, rs, clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
 	__syncthreads();
-	copyToGlobalMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
-
-	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	resultCostsArray[blockIdx.x].totalCosts = costs[0].totalCosts;
-	resultCostsArray[blockIdx.x].PairWiseCosts = costs[0].PairWiseCosts;
-	resultCostsArray[blockIdx.x].VisualBalanceCosts = costs[0].VisualBalanceCosts;
-	resultCostsArray[blockIdx.x].FocalPointCosts = costs[0].FocalPointCosts;
-	resultCostsArray[blockIdx.x].SymmetryCosts = costs[0].SymmetryCosts;
-	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
-	resultCostsArray[blockIdx.x].SurfaceAreaCosts = costs[0].SurfaceAreaCosts;
-	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
-	resultCostsArray[blockIdx.x].ClearanceCosts = costs[0].ClearanceCosts;
-	resultCostsArray[blockIdx.x].OffLimitsCosts = costs[0].OffLimitsCosts;
+	int lowest_cost = lowestIndex(best_cost, jumper);
+	copyToGlobalMemory(p, srf, resultCostsArray, best_conf, costs, lowest_cost);
 	__syncthreads();
 
 }
