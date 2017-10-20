@@ -18,6 +18,10 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
+//Working group code
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
+
 // helper functions and utilities to work with CUDA
 #include <helper_functions.h>
 #include <helper_cuda.h>
@@ -186,10 +190,20 @@ __device__ float phi(float xi, float yi, float xj, float yj, float tj)
 	return atan2(yi - yj, xi - xj) - tj + PI / 2.0;
 }
 
+//To get coop groups working, we need to remove the useage of shared memory. We can do this using a shuffle/reduce
+//taken from https://devblogs.nvidia.com/parallelforall/faster-parallel-reductions-kepler/
+template<int tile_sz>
+ __device__ float reduce(cg::thread_block_tile<tile_sz> group, float val) { //Group size is static, so no need to include that
+	for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+		val += group.shfl_down(val, offset);
+	}
+	return val;
+}
+
 //Modest reduction algorithm with a lot of room to improve upon
-__device__ void reduce(float *values, int n) { //Size of the array (from how we use it, it's at most of size blockDim.x)
-	int stride = blockDim.x/2;
-	int tid = threadIdx.x;
+/*__device__ void reduce(cg::thread_group group,float *values, int n) { //Size of the array (from how we use it, it's at most of size blockDim.x)
+	int stride = group.size()/2;
+	int tid = group.thread_rank();
 	int size = n;
 	//We make the very important for parallel reduction assumptions that blockDim is a power of two and values is a multiple of blockdim
 	//We can do this because we control those
@@ -200,43 +214,44 @@ __device__ void reduce(float *values, int n) { //Size of the array (from how we 
 		}
 		size = size / 2;
 		stride = stride / 2;
-		__syncthreads();
+		group.sync();
 		//local variable per thread, so no race condition
 	}
-}
-
-__device__ double VisualBalanceCosts(Surface *srf, positionAndRotation *cfg)
+}*/
+template<int tile_sz>
+__device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg)
 {
-	int tid = threadIdx.x;
-	int step = blockDim.x;
-	__shared__ float nx[WARP_SIZE];// = 0;
-	__shared__ float ny[WARP_SIZE];// = 0;
-	__shared__ float denom[WARP_SIZE];// = 0;
+	int tid =  group.thread_rank();
+	int step = group.size();
+	float nx;// = 0;
+	float ny;// = 0;
+	float denom;// = 0;
 	//because of multiple share blocks, we do an atomic add instead of the reduce method
-	nx[tid] = 0.0;
-	ny[tid] = 0.0;
-	denom[tid] = 0.0;
+	nx = 0.0;
+	ny = 0.0;
+	denom = 0.0;
 	for (int i = tid; i < srf->nObjs; i+=step)
 	{
 		float area = cfg[i].length * cfg[i].width;
-		nx[tid] += area * cfg[i].x;
-		ny[tid] += area * cfg[i].y;
-		denom[tid] += area;
+		nx += area * cfg[i].x;
+		ny += area * cfg[i].y;
+		denom += area;
 	}
-	__syncthreads();
-	reduce(nx, step);
-	reduce(ny, step);
-	reduce(denom, step);
+	group.sync();
+	reduce(group, nx);
+	reduce(group, ny);
+	reduce(group, denom);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
-	return  Distance(nx[0] / denom[0], ny[0] / denom[0], srf->centroidX / 2, srf->centroidY / 2);
+	return  Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2); //Because we are all reducing, all values should be the same
 }
 
-__device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
+template<int tile_sz>
+__device__ double PairWiseCosts(cg::thread_block_tile<tile_sz> group,Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	int step = blockDim.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	int tid = group.thread_rank();
+	int step = group.size();
+	float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = 0; i < srf->nRelationships; i+=step)
 	{
 		// Look up source index from relationship and retrieve object using that index.
@@ -246,34 +261,36 @@ __device__ double PairWiseCosts(Surface *srf, positionAndRotation* cfg, relation
 		if (distance < rs[i].TargetRange.targetRangeStart)
 		{
 			double fraction = distance / rs[i].TargetRange.targetRangeStart;
-			values[tid] -= (fraction * fraction);
+			values -= (fraction * fraction);
 		}
 		//penalize if we are too far
 		else if (distance > rs[i].TargetRange.targetRangeEnd)
 		{
 			double fraction = rs[i].TargetRange.targetRangeEnd / distance;
-			values[tid] -= (fraction * fraction);
+			values -= (fraction * fraction);
 		}
 		else {
-			values[tid] -= 1;
+			values -= 1;
 		}
 		// Else don't do anything as 0 indicates a perfect solution
 	}
-	__syncthreads();
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return (double)values[0];
+	return (double)values;
 }
 
 //This functional principle uses a lookup (relationshipStruct) to determine weights from a recommended angle
 //This is not the facing angle but the distance angle (so, the target rotated around the source)
-__device__ double PairWiseTotalCosts(Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
+template<int tile_sz>
+__device__ double PairWiseTotalCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	int tid = group.thread_rank();
+	int step = group.size();
+	float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 						//assuming (0,2*PI]
-	for (int i = tid; i < srf->nRelationships; i += blockDim.x)
+	for (int i = tid; i < srf->nRelationships; i += step)
 	{
 		// We use phi to calculate the angle between the rotation of the object and the target object
 		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
@@ -289,20 +306,22 @@ __device__ double PairWiseTotalCosts(Surface *srf, positionAndRotation* cfg, rel
 		norm = (2.0 * PI - norm) / 2.0;
 		double a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(distance - rs[i].AngleRange.targetRangeStart), 
 																													 fabs(distance - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
-		values[tid] -= score*a_score; //So, best score we can do is -1, and everything else degrades from there
+		values -= score*a_score; //So, best score we can do is -1, and everything else degrades from there
 	}
-	__syncthreads();
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return values[0];
+	return values;
 }
 
-__device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
+template<int tile_sz>
+__device__ double FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg)
 {
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nObjs; i += blockDim.x)
+	int tid = group.thread_rank();
+	int step = group.size();
+	float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	for (int i = tid; i < srf->nObjs; i += step)
 	{
 		float phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
 		// Old implementation of grouping, all objects that belong to the seat category are used in the focal point calculation
@@ -310,23 +329,23 @@ __device__ double FocalPointCosts(Surface *srf, positionAndRotation* cfg)
 		//int s_i = s(r.c[i]);
 
 		// sum += s_i * cos(phi_fi);
-		values[tid] -= cos(phi_fi);
+		values -= cos(phi_fi);
 	}
-
-	__syncthreads();
-
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce(group, values);
 	//printf("tid = %d, value = %f\n", tid, values[tid]);
 	//printf("Clearance costs error: %f\n", error);
-	return (double)values[0];
+	return (double)values;
 }
 
-__device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
+template<int tile_sz>
+__device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg)
 {
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nObjs; i += blockDim.x)
+	int tid = group.thread_rank();
+	int step = group.size();
+	__shared__ float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	for (int i = tid; i < srf->nObjs; i += step)
 	{
 		float maxVal = 0;
 
@@ -354,13 +373,13 @@ __device__ float SymmetryCosts(Surface *srf, positionAndRotation* cfg)
 			maxVal = fmaxf(maxVal, val);
 		}
 
-		values[tid] -= maxVal;
+		values -= maxVal;
 	}
 
-	__syncthreads();
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return values[0];
+	return values;
 }
 
 
@@ -446,13 +465,13 @@ __device__ vertex maxValue(vertex *vertices, int startIndexVertices, float xtran
 }
 
 // Clearance costs is calculated by determining any intersections between clearances and offlimits. Clearances may overlap with other clearances
-__device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits)
+template<int tile_sz>
+__device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits)
 {
-	//printf("Clearance cost calculation\n");
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	int step = blockDim.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	int tid = group.thread_rank();
+	int step = group.size();
+	float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nClearances; i+=step) {
 		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
@@ -470,23 +489,24 @@ __device__ float ClearanceCosts(Surface *srf, positionAndRotation* cfg, vertex *
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
 			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
 			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-			values[tid] = area; //Clearence penalty should be positive
+			values = area; //Clearence penalty should be positive
 		}
 	}
-	__syncthreads();
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return values[0];
+	return values;
 }
 
 // Both clearance as offlimits may not lie outside of the surface area
-__device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle) {
+template<int tile_sz>
+__device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle) {
 	//printf("Surface cost calculation\n");
 
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	int step = blockDim.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	int tid = group.thread_rank();
+	int step = group.size();
+	float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 						// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
 	vertex complementRectangle1[2];
 	vertex complementRectangle2[2];
@@ -512,10 +532,10 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 
 
 		// printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
 
 	for (int j = tid; j < srf->nObjs; j += step) {
@@ -526,23 +546,24 @@ __device__ float SurfaceAreaCosts(Surface *srf, positionAndRotation* cfg, vertex
 		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		values[tid] -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
 
-	__syncthreads();
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return values[0];
+	return values;
 }
 
-__device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *vertices, rectangle *offlimits) {
-	__shared__ float values[WARP_SIZE];
-	int tid = threadIdx.x;
-	int step = blockDim.x;
-	values[tid] = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+template<int tile_sz>
+__device__ float OffLimitsCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg, vertex *vertices, rectangle *offlimits) {
+	int tid = group.thread_rank();
+	int step = group.size();
+	float values;
+	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += step) {
 		vertex rect1Min = minValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
 		vertex rect1Max = maxValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
@@ -563,58 +584,71 @@ __device__ float OffLimitsCosts(Surface *srf, positionAndRotation *cfg, vertex *
 
 			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
 			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-			values[tid] -= area;
+			values -= area;
 		}
 
 	}
 
-	__syncthreads();
-	reduce(values, blockDim.x);
+	group.sync();
+	reduce(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return values[0];
+	return values;
 }
 
-__device__ void Costs(Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
+template<int tile_sz>
+__device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, resultCosts* costs, positionAndRotation* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
+	int gid = group.thread_rank();
 	//float pairWiseCosts = 0;
-	float pairWiseCosts = srf->WeightPairWise * PairWiseTotalCosts(srf, cfg, rs);
-	costs->PairWiseCosts = pairWiseCosts;
+	float pairWiseCosts =  PairWiseTotalCosts<tile_sz>(group, srf, cfg, rs);
+	pairWiseCosts *= srf->WeightPairWise;
+
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 
 	//float visualBalanceCosts = 0;
-	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(srf, cfg);
-	costs->VisualBalanceCosts = visualBalanceCosts;
+	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts(group, srf, cfg);
+	
 	// printf("Visual balance costs with weight %f\n", visualBalanceCosts);
 
 	//float focalPointCosts = 0;
-	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts(srf, cfg);
-	costs->FocalPointCosts = focalPointCosts;
+	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts(group, srf, cfg);
+	
 	// printf("Focal point costs with weight %f\n", focalPointCosts);
 
 	//float symmertryCosts = 0;
-	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(srf, cfg);
-	costs->SymmetryCosts = symmertryCosts;
+	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts(group, srf, cfg);
+	
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 
 	//float offlimitsCosts = 0;
-	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(srf, cfg, vertices, offlimits);
+	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts(group, srf, cfg, vertices, offlimits);
 	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
-	costs->OffLimitsCosts = offlimitsCosts;
+	
 
 	//float clearanceCosts = 0;
-	float clearanceCosts = srf->WeightClearance * ClearanceCosts(srf, cfg, vertices, clearances, offlimits);
+	float clearanceCosts = srf->WeightClearance * ClearanceCosts(group, srf, cfg, vertices, clearances, offlimits);
 	// printf("Clearance costs with weight %f\n", clearanceCosts);
-	costs->ClearanceCosts = clearanceCosts;
+	
 
 	//float surfaceAreaCosts = 0;
-	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
+	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
-	costs->SurfaceAreaCosts = surfaceAreaCosts;
-
-
-	float totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->SurfaceAreaCosts;
+	
+	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + surfaceAreaCosts;
+	if (gid == 0) {
+		costs->PairWiseCosts = pairWiseCosts;
+		costs->VisualBalanceCosts = visualBalanceCosts;
+		costs->FocalPointCosts = focalPointCosts;
+		costs->SymmetryCosts = symmertryCosts;
+		costs->OffLimitsCosts = offlimitsCosts;
+		costs->ClearanceCosts = clearanceCosts;
+		costs->SurfaceAreaCosts = surfaceAreaCosts;
+		costs->totalCosts = totalCosts;
+	}
+	group.sync();
+	
 	// printf("Total costs %f\n", totalCosts);
-	costs->totalCosts = totalCosts;
+	
 }
 
 __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo) 
@@ -641,9 +675,10 @@ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid
 	return (int)truncf(p_rand);
 }
 
-__device__ void propose(Surface *srf, positionAndRotation *cfgStar, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
+template<int tile_sz>
+__device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfgStar, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
 {
-	int gid = tid;
+	int gid = group.thread_rank();
 	/*for (int j = 0; j < srf->nObjs; j++)
 	{
 		printf("Star values inside proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
@@ -833,11 +868,12 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 	return  randomNumber < fminf(1.0f, (float) exp(BETA * (costStar - costCur)));
 }
 
-__device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surface* srf) 
+template<int tile_sz>
+__device__ void Copy(cg::thread_block_tile<tile_sz> group, positionAndRotation* cfg1, positionAndRotation* cfg2, Surface* srf)
 {
-	int breakup = blockDim.x;
-	int tid = threadIdx.x;
-	for (unsigned int i = tid; i < srf->nObjs; i += breakup)
+	int tid = group.thread_rank();
+	int step = group.size();
+	for (unsigned int i = tid; i < srf->nObjs; i += step)
 	{
 		cfg1[i].x = cfg2[i].x;
 		cfg1[i].y = cfg2[i].y;
@@ -849,168 +885,158 @@ __device__ void Copy(positionAndRotation* cfg1, positionAndRotation* cfg2, Surfa
 		cfg1[i].length = cfg2[i].length;
 		cfg1[i].width = cfg2[i].width;
 	}
-	__syncthreads();
+	group.sync();
 }
 
-// result is a [,] array with 1 dimension equal to the amount of blocks used and the other dimension equal to the amount of objects
-// rs is an array with the length equal to the amount of relationships
-// cfg is an array with the length equal to the amount of objects
-// Surface is a basic struct
-__global__ void Kernel(resultCosts* resultCostsArray, point *p, relationshipStruct *rs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg, curandState *rngStates)
+template<int tile_sz>
+__device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
+	positionAndRotation* cfgBest,
+	resultCosts* bestCosts,
+	positionAndRotation* cfgStar,
+	resultCosts* starCosts,
+	relationshipStruct *rs,
+	rectangle *clearances, rectangle *offlimits,
+	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
+	int iterations, curandState *rngStates)
 {
-//    printf("current block [%d, %d]:\n",\
-//            blockIdx.y*gridDim.x+blockIdx.x,\
-//            threadIdx.z*blockDim.x*blockDim.y+threadIdx.y*blockDim.x+threadIdx.x);
-	// Calculate current tid
-	unsigned int tid  = blockIdx.x * blockDim.x + threadIdx.x;
-	unsigned int gtid = threadIdx.x; //The thread id in the working group
-	unsigned int step = blockDim.x; //The working group block size
-	// Read out starting configuration from resultArray
-	// Copy best config (now set to input config) to result of this block
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
+	int gtid = group.thread_rank();//The thread id in the working group
+	int step = group.size();//The working group block size
+							// Read out starting configuration from resultArray
+							// Copy best config (now set to input config) to result of this block
 
+	bool accept;
+	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
 
-	// Initialize current configuration to global memory
-	//extern __shared__ positionAndRotation all_memory[];
-	//positionAndRotation* cfgCurrent = all_memory;
-	//positionAndRotation* cfgStar = &cfgCurrent[srf->nObjs];
-	//positionAndRotation* cfgBest = &cfgStar[srf->nObjs];
-	__shared__ positionAndRotation* cfgCurrent;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-	__shared__ positionAndRotation* cfgStar;// = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-	__shared__ positionAndRotation* cfgBest;
-	//No need to put resultCosts in global memory for one warp size
-	__shared__ resultCosts starCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
-	__shared__ resultCosts currentCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
-	__shared__ resultCosts bestCosts;// = (resultCosts*)malloc(sizeof(resultCosts));
-	__shared__ bool accept;
-	if (gtid == 0) { //This means that we only have one malloc a group, and that is written to the shared variable
-		cfgCurrent   = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-		cfgStar      = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-		//starCosts    = (resultCosts*)malloc(sizeof(resultCosts));
-		//currentCosts = (resultCosts*)malloc(sizeof(resultCosts));
-		cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-		//bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
-	}
-	__syncthreads();
-	// Copy from result(previous)
-	for (unsigned int i = gtid; i < srf->nObjs; i+=step)
-	{
-		// BlockId counts from 0, so to properly multiply
-		int index = blockIdx.x * srf->nObjs + i;
-		cfgCurrent[i].x = p[index].x;
-		cfgCurrent[i].y = p[index].y;
-		cfgCurrent[i].z = p[index].z;
-		cfgCurrent[i].rotX = p[index].rotX;
-		cfgCurrent[i].rotY = p[index].rotY;
-		cfgCurrent[i].rotZ = p[index].rotZ;
-		cfgCurrent[i].frozen = p[index].frozen;
-		cfgCurrent[i].length = p[index].length;
-		cfgCurrent[i].width = p[index].width;
-	}
-	// Copy(cfgCurrent, cfg, srf);
-	__syncthreads();
-	Costs(srf, &currentCosts, cfgCurrent, rs, vertices, clearances, offlimits, surfaceRectangle);
-	
-	//positionAndRotation* cfgBest = (positionAndRotation*)malloc(srf->nObjs * sizeof(positionAndRotation));
-	Copy(cfgBest, cfgCurrent, srf);
-	//resultCosts* bestCosts = (resultCosts*)malloc(sizeof(resultCosts));
-	CopyCosts(&currentCosts, &bestCosts);
+	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
+	CopyCosts(bestCosts, starCosts);
 	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 
-	for (int i = 0; i < gpuCfg->iterations; i++)
+	for (int i = 0; i < iterations; i++)
 	{
-		accept = false;
-		//printf("iteration: %d\n", i);
-		// Create cfg Star and initialize it to cfgcurrent that will have a proposition done to it.
-		/*for (int j = 0; j < srf->nObjs; j++)
-		{
-			printf("Current values before copy of result jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgCurrent[j].x, cfgCurrent[j].y, cfgCurrent[j].z, cfgCurrent[j].rotX, cfgCurrent[j].rotY, cfgCurrent[j].rotZ);
-		}*/
-		Copy(cfgStar, cfgCurrent, srf);
-		/*for (int j = 0; j < srf->nObjs; j++)
-		{
-			printf("Star values after Copy, before proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
-		}*/
-		// cfgStar contains an array with translated objects
 		
-		propose(srf, cfgStar, surfaceRectangle, rngStates, tid);
-		__syncthreads(); //Copy has a sync, so not needed
-		/* for (int j = 0; j < srf->nObjs; j++)
-		{
-			printf("Star values after proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
-		} */
-
-		Costs(srf, &starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
-		// printf("Cost star configuration: %f\n", starCosts->totalCosts);
-		// printf("Cost best configuration: %f\n", bestCosts->totalCosts);
-		// star has a better cost function than best cost, star is the new best
-		if (starCosts.totalCosts < bestCosts.totalCosts)
-		{
-			//printf("New best %f\n", bestCosts->totalCosts);
-
-			// Copy star into best for storage
-				Copy(cfgBest, cfgStar, srf);
-				CopyCosts(&starCosts, &bestCosts);
-			//printf("Threadblock: %d, New costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-			}
-
-		// Check whether we continue with current or we continue with star
-		__syncthreads();
+		propose<tile_sz>(group, srf, cfgStar, surfaceRectangle, rngStates, tid);
+		group.sync();
+		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
+		group.sync();
 		if (gtid == 0) {
-			accept = Accept(starCosts.totalCosts, currentCosts.totalCosts, rngStates, tid);
+			accept = Accept(starCosts->totalCosts, bestCosts->totalCosts, rngStates, tid);
+
 		}
-		__syncthreads();
+		accept = group.shfl(accept, 0);
+		group.sync();
 		if (accept)
 		{
 			// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
 			//printf("Star accepted as new current.\n");
 			// Copy star into current
-			Copy(cfgCurrent, cfgStar, srf);
-			CopyCosts(&starCosts, &currentCosts);
+			Copy<tile_sz>(group, cfgBest, cfgStar, srf);
+			CopyCosts(starCosts, bestCosts);
+		}
+		else { //Reject it
+			Copy<tile_sz>(group, cfgStar, cfgBest, srf);
+			CopyCosts(bestCosts, starCosts);
 		}
 
+		// Check whether we continue with current or we continue with star
 	}
 
-	__syncthreads();
-	
-	// Copy best config (now set to input config) to result of this block
-	for (unsigned int i = gtid; i < srf->nObjs; i+=step)
+	group.sync();
+}
+
+//Helper function to copy the information from global memory into a shared array
+template<int tile_sz>
+__device__ void copyToSharedMemory(cg::thread_block_tile<tile_sz> group,
+	point *p,
+	Surface *srf,
+	positionAndRotation* configuration) {
+	int gid = group.thread_rank();
+	for (unsigned int i = gid; i < srf->nObjs; i += WARP_SIZE)
 	{
 		// BlockId counts from 0, so to properly multiply
 		int index = blockIdx.x * srf->nObjs + i;
-		p[index].x = cfgBest[i].x;
-		p[index].y = cfgBest[i].y;
-		p[index].z = cfgBest[i].z;
-		p[index].rotX = cfgBest[i].rotX;
-		p[index].rotY = cfgBest[i].rotY;
-		p[index].rotZ = cfgBest[i].rotZ;
-		p[index].frozen = cfgBest[i].frozen;
-		p[index].length = cfgBest[i].length;
-		p[index].width = cfgBest[i].width;
+		configuration[i].x = p[index].x;
+		configuration[i].y = p[index].y;
+		configuration[i].z = p[index].z;
+		configuration[i].rotX = p[index].rotX;
+		configuration[i].rotY = p[index].rotY;
+		configuration[i].rotZ = p[index].rotZ;
+		configuration[i].frozen = p[index].frozen;
+		configuration[i].length = p[index].length;
+		configuration[i].width = p[index].width;
 	}
-	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	resultCostsArray[blockIdx.x].totalCosts = bestCosts.totalCosts;
-	resultCostsArray[blockIdx.x].PairWiseCosts = bestCosts.PairWiseCosts;
-	resultCostsArray[blockIdx.x].VisualBalanceCosts = bestCosts.VisualBalanceCosts;
-	resultCostsArray[blockIdx.x].FocalPointCosts = bestCosts.FocalPointCosts;
-	resultCostsArray[blockIdx.x].SymmetryCosts = bestCosts.SymmetryCosts;
-	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
-	resultCostsArray[blockIdx.x].SurfaceAreaCosts = bestCosts.SurfaceAreaCosts;
-	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
-	resultCostsArray[blockIdx.x].ClearanceCosts = bestCosts.ClearanceCosts;
-	resultCostsArray[blockIdx.x].OffLimitsCosts = bestCosts.OffLimitsCosts;
-	
-	__syncthreads();
-	if (gtid == 0) {
-		free(cfgCurrent);
-		//free(currentCosts);
-		free(cfgStar);
-		//free(starCosts);
-		free(cfgBest);
-		//free(bestCosts);
-	}
-	//free(cfgBest);
-	//free(bestCosts);
+
 }
+//Helper function to copy the information from shared to global. This will change when we do the actual best
+template<int tile_sz>
+__device__ void copyToGlobalMemory(cg::thread_block_tile<tile_sz> group,
+	point *p,
+	Surface *srf,
+	positionAndRotation* configuration) {
+	int gid = group.thread_rank();
+	//Copy current config back into the global memory
+	// Copy best config (now set to input config) to result of this block
+	for (unsigned int i = gid; i < srf->nObjs; i += WARP_SIZE)
+	{
+		// BlockId counts from 0, so to properly multiply
+		int index = blockIdx.x * srf->nObjs + i;
+		p[index].x = configuration[i].x;
+		p[index].y = configuration[i].y;
+		p[index].z = configuration[i].z;
+		p[index].rotX = configuration[i].rotX;
+		p[index].rotY = configuration[i].rotY;
+		p[index].rotZ = configuration[i].rotZ;
+		p[index].frozen = configuration[i].frozen;
+		p[index].length = configuration[i].length;
+		p[index].width = configuration[i].width;
+	}
+
+}
+// result is a [,] array with 1 dimension equal to the amount of blocks used and the other dimension equal to the amount of objects
+// rs is an array with the length equal to the amount of relationships
+// cfg is an array with the length equal to the amount of objects
+// Surface is a basic struct
+
+__global__ void Kernel(resultCosts* resultCostsArray,
+	point *p, relationshipStruct *rs,
+	rectangle *clearances, rectangle *offlimits,
+	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
+	gpuConfig *gpuCfg, curandState *rngStates) {
+
+	extern __shared__ int all_shared_memory[];
+	int jumper = blockDim.x / WARP_SIZE;
+	positionAndRotation* configurations = (positionAndRotation*)&all_shared_memory;
+	resultCosts* costs = (resultCosts*)&configurations[2 * jumper * srf->nObjs]; 
+	__syncthreads();
+   //create the working groups
+	int rank = threadIdx.x / WARP_SIZE;
+	positionAndRotation* best_conf = &configurations[rank * srf->nObjs];
+	positionAndRotation* star_conf = &configurations[srf->nObjs * blockDim.x / WARP_SIZE + rank];
+	resultCosts* best_cost = &costs[rank];
+	resultCosts* star_cost = &costs[jumper + rank];
+	auto tile_warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block()); //Broken up by our warp size, which is our static shared memory size!
+
+	//This is the actual work done
+	copyToSharedMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
+	groupKernel<WARP_SIZE>(tile_warp,best_conf,best_cost,star_conf,star_cost, rs, clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
+	__syncthreads();
+	copyToGlobalMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
+
+	//printf("Threadblock: %d, Result costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
+	resultCostsArray[blockIdx.x].totalCosts = costs[0].totalCosts;
+	resultCostsArray[blockIdx.x].PairWiseCosts = costs[0].PairWiseCosts;
+	resultCostsArray[blockIdx.x].VisualBalanceCosts = costs[0].VisualBalanceCosts;
+	resultCostsArray[blockIdx.x].FocalPointCosts = costs[0].FocalPointCosts;
+	resultCostsArray[blockIdx.x].SymmetryCosts = costs[0].SymmetryCosts;
+	//printf("Best surface area costs: %f\n", bestCosts->SurfaceAreaCosts);
+	resultCostsArray[blockIdx.x].SurfaceAreaCosts = costs[0].SurfaceAreaCosts;
+	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
+	resultCostsArray[blockIdx.x].ClearanceCosts = costs[0].ClearanceCosts;
+	resultCostsArray[blockIdx.x].OffLimitsCosts = costs[0].OffLimitsCosts;
+	__syncthreads();
+
+}
+
 
 extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
 {
@@ -1083,8 +1109,8 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	// Block 1 dimensional, amount of threads available, configurable
 	// Grid 1 dimension, amount of suggestions to be made.
 	//we make the dynamic memory 3 times because we have at least 3 arrays that use it in one function
-	//int share_size = 3 * srf->nObjs * sizeof(positionAndRotation);
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	int share_size = gpuCfg->blockxDim / WARP_SIZE * 2 * srf->nObjs * sizeof(positionAndRotation) + gpuCfg->blockxDim / WARP_SIZE * 2 * sizeof(resultCosts);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim,share_size>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -1145,7 +1171,7 @@ int main(int argc, char **argv)
 	basicCudaDeviceInformation(argc, argv);
 
 	const int N = 10;
-	const int NRel = 0;
+	const int NRel = 1;
 	const int NClearances = 30;
 	Surface srf;
 	srf.nObjs = N;
@@ -1164,13 +1190,13 @@ int main(int argc, char **argv)
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
 
-	const int dimensions = 8;
+	const int dimensions = 1;
 
 	gpuConfig gpuCfg;
 
 	gpuCfg.gridxDim = dimensions;
 	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = WARP_SIZE;
+	gpuCfg.blockxDim = 4*WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
 	gpuCfg.iterations = 1000;//a 10th of what they claimed in the paper
