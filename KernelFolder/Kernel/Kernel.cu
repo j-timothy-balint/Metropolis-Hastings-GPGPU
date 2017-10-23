@@ -434,37 +434,40 @@ __device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, 
 
 __device__ vertex minValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
 	vertex rect1;
-	rect1.x = DBL_MAX;
-	rect1.y = DBL_MAX;
+	//rect1.x = vertices[startIndexVertices].x;
+	//rect1.y = vertices[startIndexVertices].y;
+	double second;
 	rect1.z = 0;
-	rect1.x = (rect1.x > vertices[startIndexVertices].x + xtranslation) ? vertices[startIndexVertices].x : rect1.x;
-	rect1.x = (rect1.x > vertices[startIndexVertices + 1].x + xtranslation) ? vertices[startIndexVertices + 1].x + xtranslation : rect1.x;
-	rect1.x = (rect1.x > vertices[startIndexVertices + 2].x + xtranslation) ? vertices[startIndexVertices + 2].x + xtranslation : rect1.x;
-	rect1.x = (rect1.x > vertices[startIndexVertices + 3].x + xtranslation) ? vertices[startIndexVertices + 3].x + xtranslation : rect1.x;
 
-	rect1.y = (rect1.y > vertices[startIndexVertices].y + ytranslation) ? vertices[startIndexVertices].y + ytranslation : rect1.y;
-	rect1.y = (rect1.y > vertices[startIndexVertices + 1].y + ytranslation) ? vertices[startIndexVertices + 1].y + ytranslation : rect1.y;
-	rect1.y = (rect1.y > vertices[startIndexVertices + 2].y + ytranslation) ? vertices[startIndexVertices + 2].y + ytranslation : rect1.y;
-	rect1.y = (rect1.y > vertices[startIndexVertices + 3].y + ytranslation) ? vertices[startIndexVertices + 3].y + ytranslation : rect1.y;
+	//Since the original authors decided to unroll the loop, we will continue with that idea
+	rect1.x = (vertices[startIndexVertices].x < vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices].x : vertices[startIndexVertices + 1].x;
+	second  =  (vertices[startIndexVertices + 2].x  < vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 2].x : vertices[startIndexVertices + 3].x;
+	rect1.x = (rect1.x < second) ? rect1.x : second;
+	rect1.x += xtranslation;
+
+	rect1.y = (vertices[startIndexVertices].y < vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices].y : vertices[startIndexVertices + 1].y;
+	second  = (vertices[startIndexVertices + 2].y  < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 2].y : vertices[startIndexVertices + 3].y;
+	rect1.y = (rect1.y < second) ? rect1.y : second;
+	rect1.y += ytranslation;
 	//printf("Min value vector after translation: X: %f Y: %f\n", rect1.x, rect1.y);
 	return rect1;
 }
 
 __device__ vertex maxValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
 	vertex rect1;
-	rect1.x = -DBL_MAX;
-	rect1.y = -DBL_MAX;
+	double second;
 	rect1.z = 0;
 
-	rect1.x = (rect1.x < vertices[startIndexVertices].x + xtranslation) ? vertices[startIndexVertices].x + xtranslation : rect1.x;
-	rect1.x = (rect1.x < vertices[startIndexVertices + 1].x + xtranslation) ? vertices[startIndexVertices + 1].x + xtranslation : rect1.x;
-	rect1.x = (rect1.x < vertices[startIndexVertices + 2].x + xtranslation) ? vertices[startIndexVertices + 2].x + xtranslation : rect1.x;
-	rect1.x = (rect1.x < vertices[startIndexVertices + 3].x + xtranslation) ? vertices[startIndexVertices + 3].x + xtranslation : rect1.x;
+	//Since the original authors decided to unroll the loop, we will continue with that idea
+	rect1.x = (vertices[startIndexVertices].x < vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices + 1].x : vertices[startIndexVertices].x;
+	second = (vertices[startIndexVertices + 2].x  < vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 3].x : vertices[startIndexVertices + 2].x;
+	rect1.x = (rect1.x < second) ? second : rect1.x;
+	rect1.x += xtranslation;
 
-	rect1.y = (rect1.y < vertices[startIndexVertices].y + ytranslation) ? vertices[startIndexVertices].y + ytranslation : rect1.y;
-	rect1.y = (rect1.y < vertices[startIndexVertices + 1].y + ytranslation) ? vertices[startIndexVertices + 1].y + ytranslation : rect1.y;
-	rect1.y = (rect1.y < vertices[startIndexVertices + 2].y + ytranslation) ? vertices[startIndexVertices + 2].y + ytranslation : rect1.y;
-	rect1.y = (rect1.y < vertices[startIndexVertices + 3].y + ytranslation) ? vertices[startIndexVertices + 3].y + ytranslation : rect1.y;
+	rect1.y = (vertices[startIndexVertices].y < vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices + 1].y : vertices[startIndexVertices + 1].y;
+	second = (vertices[startIndexVertices + 2].y  < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 3].y : vertices[startIndexVertices + 2].y;
+	rect1.y = (rect1.y < second) ? second : rect1.y;
+	rect1.y += ytranslation;
 	//printf("Max value vector after translation: X: %f Y: %f\n", rect1.x, rect1.y);
 	return rect1;
 }
@@ -828,19 +831,23 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 			cfg[obj2].rotX = rotX;
 			cfg[obj2].rotY = rotY;
 			cfg[obj2].rotZ = rotZ;
+			//printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfg[obj1].x, cfg[obj1].y, cfg[obj1].z, cfg[obj1].rotX, cfg[obj1].rotY, cfg[obj1].rotZ);
+			//printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfg[obj2].x, cfg[obj2].y, cfg[obj2].z, cfg[obj2].rotX, cfg[obj2].rotY, cfg[obj2].rotZ);
 		}
-		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj1, cfgStar[obj1].x, cfgStar[obj1].y, cfgStar[obj1].z, cfgStar[obj1].rotX, cfgStar[obj1].rotY, cfgStar[obj1].rotZ);
-		// printf("After copy temp into obj2, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj2, cfgStar[obj2].x, cfgStar[obj2].y, cfgStar[obj2].z, cfgStar[obj2].rotX, cfgStar[obj2].rotY, cfgStar[obj2].rotZ);
+		
+		
 	}
 }
 
 __device__ bool Accept(double costStar, double costCur, curandState *rngStates, unsigned int tid,float beta)
 {
-	//printf("(costStar - costCur):  %f\n", (costStar - costCur));
-	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
+	//printf("Costs of Star, Cur, and beta difference: %f, %f, %f\n", costStar,costCur,(costStar - costCur));
+	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)expf(beta * (costCur - costStar)));
 	float randomNumber = curand_uniform(&rngStates[tid]);
 	//printf("Random number: %f\n", randomNumber);
-	return  randomNumber < fminf(1.0f, (float) exp(beta * (costStar - costCur)));
+	//In reality, it should be -beta, because that is the boltsmann dist. However, that has the effect of favoring star configurations that are 
+	//higher cost than the current. We are trying to minimize, so beta should be positive. This way, we only accept higher costs on low betas
+	return  randomNumber < fminf(1.0f, expf(beta * (costCur - costStar)));
 }
 
 template<int tile_sz>
@@ -910,7 +917,7 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 		}
 		else { //Reject it
 			Copy<tile_sz>(group, cfgStar, cfgBest, srf);
-			CopyCosts(bestCosts, starCosts);
+			//CopyCosts(bestCosts, starCosts);
 		}
 
 		// Check whether we continue with current or we continue with star
@@ -984,7 +991,7 @@ __device__ void copyToGlobalMemory(
 //It can be written as a reduction problem, and definitely should
 __device__ int lowestIndex(resultCosts* best_costs, int active_warps) {
 	int best_cost = 0;
-	for (int i = 0; i < active_warps; i++) {
+	for (int i = 1; i < active_warps; i++) {
 		if (best_costs[i].totalCosts < best_costs[best_cost].totalCosts) {
 			best_cost = i;
 		}
