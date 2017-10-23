@@ -497,7 +497,7 @@ __device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
 			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
 			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-			values = area; //Clearence penalty should be positive
+			values += area; //Clearence penalty should be positive
 		}
 	}
 	group.sync();
@@ -593,7 +593,7 @@ __device__ float OffLimitsCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 
 			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
 			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-			values -= area;
+			values += area;
 		}
 
 	}
