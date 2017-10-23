@@ -34,7 +34,7 @@ namespace cg = cooperative_groups;
 // Trig constants:
 #define PI (3.1416)
 
-#define BETA (0.1)
+//#define BETA (0.1)
 // Right angle constants:
 #define THETA_R (10.0 / 180.0 * PI) // 5 degrees
 
@@ -507,7 +507,7 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	int step = group.size();
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-						// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
+	// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
 	vertex complementRectangle1[2];
 	vertex complementRectangle2[2];
 	vertex complementRectangle3[2];
@@ -517,6 +517,7 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
 	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
 
+	//This gives us the total rectangle outside our surface area
 	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle1, complementRectangle2, complementRectangle3, complementRectangle4);
 
 	for (int i = tid; i < srf->nClearances; i += step) {
@@ -665,7 +666,8 @@ __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo)
 	copyTo->totalCosts = copyFrom->totalCosts;
 }
 
-__device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid, int max, int min)
+//The next two device helper functions generate random numbers
+__inline__ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid, int max, int min)
 {
 	curandState localState = rngStates[tid];
 	float p_rand = curand_uniform(&localState);
@@ -673,6 +675,16 @@ __device__ int generateRandomIntInRange(curandState *rngStates, unsigned int tid
 	p_rand *= (max - min + 0.999999);
 	p_rand += min;
 	return (int)truncf(p_rand);
+}
+
+__inline__ __device__ float generateRandomFloatInRange(curandState *rngStates, unsigned int tid, int max, int min)
+{
+	curandState localState = rngStates[tid];
+	float p_rand = curand_uniform(&localState);
+	rngStates[tid] = localState;
+	p_rand *= (max - min + 0.999999);
+	p_rand += min;
+	return p_rand; //The only difference between float and int is that we do not trucate the float in this one
 }
 
 template<int tile_sz>
@@ -683,12 +695,11 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 	{
 		printf("Star values inside proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].rotY, cfgStar[j].rotZ);
 	}*/
-	int p = - 1;
-	if (gid == 0) {
-		p = generateRandomIntInRange(rngStates, tid, 2, 0);
-	}
+	int p = generateRandomIntInRange(rngStates, tid, 2, 0);
+
+	//Get everyone on the same page
 	p = group.shfl(p, 0); //broadcast out to p
-	group.sync();
+	//group.sync(); shlf_sync is broadcast and so should sync
 	// Determine width and length of surface rectangle
 	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
 	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
@@ -845,13 +856,13 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 	}
 }
 
-__device__ bool Accept(double costStar, double costCur, curandState *rngStates, unsigned int tid)
+__device__ bool Accept(double costStar, double costCur, curandState *rngStates, unsigned int tid,float beta)
 {
 	//printf("(costStar - costCur):  %f\n", (costStar - costCur));
 	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)exp(-BETA * (costStar - costCur)));
 	float randomNumber = curand_uniform(&rngStates[tid]);
 	//printf("Random number: %f\n", randomNumber);
-	return  randomNumber < fminf(1.0f, (float) exp(BETA * (costStar - costCur)));
+	return  randomNumber < fminf(1.0f, (float) exp(beta * (costStar - costCur)));
 }
 
 template<int tile_sz>
@@ -892,6 +903,8 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 							// Copy best config (now set to input config) to result of this block
 
 	bool accept;
+	float beta = generateRandomFloatInRange(rngStates, tid, 3, 0);
+	beta = group.shfl(beta, 0);//shf calls shfl_sync, which as a broadcast should sync
 	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
 
 	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
@@ -904,13 +917,11 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 		propose<tile_sz>(group, srf, cfgStar, surfaceRectangle, rngStates, tid);
 		group.sync();
 		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
-		group.sync();
 		if (gtid == 0) {
-			accept = Accept(starCosts->totalCosts, bestCosts->totalCosts, rngStates, tid);
+			accept = Accept(starCosts->totalCosts, bestCosts->totalCosts, rngStates, tid,beta);
 
 		}
 		accept = group.shfl(accept, 0);
-		group.sync();
 		if (accept)
 		{
 			// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
@@ -992,6 +1003,7 @@ __device__ void copyToGlobalMemory(
 }
 
 //This function figures out the lowest cost of our search
+//It can be written as a reduction problem, and definitely should
 __device__ int lowestIndex(resultCosts* best_costs, int active_warps) {
 	int best_cost = 0;
 	for (int i = 0; i < active_warps; i++) {
