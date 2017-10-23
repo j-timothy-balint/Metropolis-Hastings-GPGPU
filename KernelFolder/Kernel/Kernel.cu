@@ -162,6 +162,11 @@ __global__ void initRNG(curandState *const rngStates, const unsigned int seed)
 	curand_init(seed + tid, tid, 0, &rngStates[tid]);
 }
 
+//Given the prevalance in graphics, I'm really surprised this isn't a standard function in cuda
+__inline__ __device__ double clamp(double value, double min, double max) {
+	return fminf(max, fmaxf(value, min));
+}
+
 __device__ double Distance(float xi, float yi, float xj, float yj) 
 {
 	double dX = xi - xj;
@@ -301,11 +306,10 @@ __device__ double PairWiseTotalCosts(cg::thread_block_tile<tile_sz> group, Surfa
 		score        = (distance > rs[i].TargetRange.targetRangeEnd)   ? powf(rs[i].TargetRange.targetRangeEnd / distance  , rs[i].DegreesOfAtrraction)  : 1.0;
 
 		//For now, we assume start is greater than end
-		double norm    = (rs[i].TargetRange.targetRangeStart < rs[i].TargetRange.targetRangeEnd)? rs[i].AngleRange.targetRangeEnd - rs[i].AngleRange.targetRangeStart : 
-																								  rs[i].AngleRange.targetRangeStart - rs[i].AngleRange.targetRangeEnd; //The max distance away is half the slice that is in the no zone 
+		double norm    = fabs(rs[i].AngleRange.targetRangeEnd - rs[i].AngleRange.targetRangeStart)/2.0; //The max distance away is half the slice that is in the no zone 
 		norm = (2.0 * PI - norm) / 2.0;
-		double a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(distance - rs[i].AngleRange.targetRangeStart), 
-																													 fabs(distance - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
+		double a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(angle- rs[i].AngleRange.targetRangeStart), 
+																													 fabs(angle - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
 		values -= score*a_score; //So, best score we can do is -1, and everything else degrades from there
 	}
 	group.sync();
@@ -730,31 +734,13 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 		//printf("Selected object #: %d\n", obj);
 		if (gid == 0) {
 			float dx = curand_normal(&rngStates[tid]);
-			dx = dx * stdXAxis;
+			cfg[obj].x += dx * stdXAxis;
 			//printf("dx: %f\n", dx);
 			float dy = curand_normal(&rngStates[tid]);
-			dy = dy * stdYAxis;
+			cfg[obj].y += dy * stdYAxis;
 			// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
-
-			// When object exceeds surfacearea, snap it back.
-			if (cfg[obj].x + dx > srfRect1Max.x) {
-				cfg[obj].x = srfRect1Max.x;
-			}
-			else if (cfg[obj].x + dx < srfRect1Min.x) {
-				cfg[obj].x = srfRect1Min.x;
-			}
-			else {
-				cfg[obj].x += dx;
-			}
-			if (cfg[obj].y + dy > srfRect1Max.y) {
-				cfg[obj].y = srfRect1Max.y;
-			}
-			else if (cfg[obj].y + dy < srfRect1Min.y) {
-				cfg[obj].y = srfRect1Min.y;
-			}
-			else {
-				cfg[obj].y += dy;
-			}
+			cfg[obj].x = clamp(cfg[obj].x, srfRect1Min.x, srfRect1Max.x); //xClamps
+			cfg[obj].y = clamp(cfg[obj].y, srfRect1Min.y, srfRect1Max.y); //yClamps
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
@@ -771,22 +757,13 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 		int mask = group.ballot(!cfg[obj].frozen);
 		int leader = __ffs(mask);
 		obj = group.shfl(obj, leader);
-
-
 		if (gid == 0) {
 			// printf("Selected object #: %d\n", obj);
 			// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 			float dRot = curand_normal(&rngStates[tid]);
-			dRot = dRot * S_SIGMA_T;
-			// printf("dRot: %f\n", dRot);
-			// printf("before rotation: %f\n", cfgStar[obj].rotY);
-			cfg[obj].rotY += dRot;
-			// printf("After rotation: %f\n", cfgStar[obj].rotY);
-
-			if (cfg[obj].rotY < 0)
-				cfg[obj].rotY += 2 * PI;
-			else if (cfg[obj].rotY > 2 * PI)
-				cfg[obj].rotY -= 2 * PI;
+			cfg[obj].rotY += dRot * S_SIGMA_T;
+			cfg[obj].rotY  = (cfg[obj].rotY  <    0) ? cfg[obj].rotY + 2 * PI : cfg[obj].rotY;
+			cfg[obj].rotY =  (cfg[obj].rotY >= 2*PI) ? cfg[obj].rotY - 2 * PI : cfg[obj].rotY;
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
