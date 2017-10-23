@@ -105,6 +105,7 @@ struct Surface
 	float WeightOffLimits;
 	float WeightClearance;
 	float WeightSurfaceArea;
+	float WeightAlignment;
 
 	// Centroid
 	double centroidX;
@@ -145,6 +146,7 @@ struct resultCosts
 	float ClearanceCosts;
 	float OffLimitsCosts;
 	float SurfaceAreaCosts;
+	float AlignmentCosts;
 };
 
 struct result {
@@ -248,6 +250,21 @@ __device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfa
 	reduce<tile_sz>(group, denom);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
 	return  Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2); //Because we are all reducing, all values should be the same
+}
+
+template<int tile_sz>
+__device__ double AlignmentCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg) {
+	int tid = group.thread_rank();
+	int step = group.size();
+	double costs = 0.0;
+	for (int i = tid; i < srf->nObjs; i += step) { //Eventually, this will transform into groups
+		for (int j = 0; j < srf->nObjs; j += step) {
+			costs += cosf(4 * cfg[i].rotY - cfg[j].rotY);
+		}
+	}
+	group.sync();
+	reduce<tile_sz>(group, costs);
+	return -costs;
 }
 
 template<int tile_sz>
@@ -483,7 +500,7 @@ __device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 	for (int i = tid; i < srf->nClearances; i+=step) {
 		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-		for (int j = tid; j < srf->nObjs; j += blockDim.x) {
+		for (int j = 0; j < srf->nObjs; j ++) {
 			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 			// Determine max and min vectors of clearance rectangles
@@ -631,28 +648,35 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 
 	//float offlimitsCosts = 0;
 	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts<tile_sz>(group, srf, cfg, vertices, offlimits);
-	// printf("OffLimits costs with weight %f\n", offlimitsCosts);
+	//printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	
 
 	//float clearanceCosts = 0;
 	float clearanceCosts = srf->WeightClearance * ClearanceCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits);
-	// printf("Clearance costs with weight %f\n", clearanceCosts);
+	
 	
 
 	//float surfaceAreaCosts = 0;
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
+
+	float alignmentCosts = srf->WeightAlignment * AlignmentCosts<tile_sz>(group, srf, cfg);
 	
-	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + surfaceAreaCosts;
+	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + surfaceAreaCosts + alignmentCosts;
 	if (gid == 0) {
 		costs->PairWiseCosts = pairWiseCosts;
 		costs->VisualBalanceCosts = visualBalanceCosts;
 		costs->FocalPointCosts = focalPointCosts;
 		costs->SymmetryCosts = symmertryCosts;
 		costs->OffLimitsCosts = offlimitsCosts;
+		//printf("OffLimits costs with weight %f\n", offlimitsCosts);
 		costs->ClearanceCosts = clearanceCosts;
+		//printf("Clearance costs with weight %f\n", clearanceCosts);
 		costs->SurfaceAreaCosts = surfaceAreaCosts;
+		costs->AlignmentCosts = alignmentCosts;
 		costs->totalCosts = totalCosts;
+		//printf("Total costs is %f\n", totalCosts);
+		
 	}
 	group.sync();
 	
@@ -671,6 +695,7 @@ __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo)
 	copyTo->OffLimitsCosts = copyFrom->OffLimitsCosts;
 	//printf("Copying Surface area costs with weight %f\n", copyFrom->SurfaceAreaCosts);
 	copyTo->SurfaceAreaCosts = copyFrom->SurfaceAreaCosts;
+	copyTo->AlignmentCosts = copyFrom->AlignmentCosts;
 	copyTo->totalCosts = copyFrom->totalCosts;
 }
 
@@ -984,6 +1009,7 @@ __device__ void copyToGlobalMemory(
 	//printf("Best clearance costs: %f\n", bestCosts->ClearanceCosts);
 	resultCostsArray[blockIdx.x].ClearanceCosts = costs[lowest_cost].ClearanceCosts;
 	resultCostsArray[blockIdx.x].OffLimitsCosts = costs[lowest_cost].OffLimitsCosts;
+	resultCostsArray[blockIdx.x].AlignmentCosts = costs[lowest_cost].AlignmentCosts;
 
 }
 
@@ -1139,6 +1165,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 		resultPointer[i].costs.ClearanceCosts = outResultCosts[i].ClearanceCosts;
 		resultPointer[i].costs.OffLimitsCosts = outResultCosts[i].OffLimitsCosts;
 		resultPointer[i].costs.SurfaceAreaCosts = outResultCosts[i].SurfaceAreaCosts;
+		resultPointer[i].costs.AlignmentCosts = outResultCosts[i].AlignmentCosts;
 		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
 	}
 	return resultPointer;
@@ -1179,19 +1206,20 @@ int main(int argc, char **argv)
 	srf.WeightClearance = 1.0f;
 	srf.WeightSurfaceArea = 1.0f;
 	srf.WeightOffLimits = 1.0f;
+	srf.WeightAlignment = 1.0f;
 	srf.centroidX = 0.0;
 	srf.centroidY = 0.0;
 	srf.focalX = 5.0;
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
 
-	const int dimensions = 8;
+	const int dimensions = 1;
 
 	gpuConfig gpuCfg;
 
 	gpuCfg.gridxDim = dimensions;
 	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = 4*WARP_SIZE;
+	gpuCfg.blockxDim = 1*WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
 	gpuCfg.iterations = 1000;//a 10th of what they claimed in the paper
@@ -1373,7 +1401,16 @@ int main(int argc, char **argv)
 				result[i].points[j].rotY,
 				result[i].points[j].rotZ);
 		}
-		
+		printf("Costs are %f+%f+%f+%f+%f+%f+%f+%f=%f\n", 
+			result[i].costs.FocalPointCosts,
+			result[i].costs.PairWiseCosts,
+			result[i].costs.SymmetryCosts,
+			result[i].costs.VisualBalanceCosts,
+			result[i].costs.ClearanceCosts,
+			result[i].costs.OffLimitsCosts,
+			result[i].costs.SurfaceAreaCosts,
+			result[i].costs.AlignmentCosts,
+			result[i].costs.totalCosts);
 	}
  	return EXIT_SUCCESS;
 }
