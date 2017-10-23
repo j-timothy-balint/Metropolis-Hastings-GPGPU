@@ -392,16 +392,17 @@ __device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, ver
 	float x6 = fminf(rect1Max.x, rect2Max.x);
 	float y6 = fminf(rect1Max.y, rect2Max.y);
 
+	return fmaxf(0.0, x6 - x5)*fmaxf(0.0, y6 - y5); //This assume that my positions are all positive, which we certainly cannot do and therefore fail because of this.
 	// Check if proper rectangle, if so it is an intersection.
-	if (x5 >= x6 || y5 >= y6)
-		return 0.0f;
+	//if (x5 >= x6 || y5 >= y6)
+	//	return 0.0f;
 
-	// printf("Intersection rectangle: Min X: %f Y: %f Max X: %f Y: %f\n", x5, y5, x6, y6);
+	//printf("Intersection rectangle: Min X: %f Y: %f Max X: %f Y: %f\n", x5, y5, x6, y6);
 
 	// Calculate area and add to error
-	float area = (x6 - x5) * (y6 - y5);
+	//float area = (x6 - x5) * (y6 - y5);
 	// printf("Area intersection rectangle: %f\n", area);
-	return area;
+	//return area;
 }
 
 __device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, vertex *complementRectangle1, vertex *complementRectangle2, vertex *complementRectangle3, vertex *complementRectangle4) {
@@ -517,7 +518,7 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
 	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
 
-	//This gives us the total rectangle outside our surface area
+	//This gives us the clearence area outside our surface area
 	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle1, complementRectangle2, complementRectangle3, complementRectangle4);
 
 	for (int i = tid; i < srf->nClearances; i += step) {
@@ -533,12 +534,12 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 
 
 		// printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
-
+	//This is meant to get all the objects that do not have a clearence. It also double-counts all the clearence objects
 	for (int j = tid; j < srf->nObjs; j += step) {
 		// Determine max and min vectors of off limit rectangles
 		// rectangle #1
@@ -547,10 +548,10 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		values -= calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
+		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
 	}
 
 	group.sync();
@@ -633,7 +634,7 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 
 	//float surfaceAreaCosts = 0;
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
-	// printf("Surface area costs with weight %f\n", surfaceAreaCosts);
+	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	
 	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + surfaceAreaCosts;
 	if (gid == 0) {
@@ -1321,7 +1322,7 @@ int main(int argc, char **argv)
 		offlimits[i].point2Index = i * 15 + 13;
 		offlimits[i].point3Index = i * 15 + 14;
 		offlimits[i].point4Index = i * 15 + 15;
-		offlimits[i].SourceIndex = 0;
+		offlimits[i].SourceIndex = i;
 	}
 
 	point cfg[N*dimensions];
