@@ -258,7 +258,8 @@ __device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfa
 	reduce<tile_sz>(group, ny);
 	reduce<tile_sz>(group, denom);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
-	return  Distance(nx / denom, ny / denom, srf->centroidX / 2, srf->centroidY / 2); //Because we are all reducing, all values should be the same
+	
+	return  Distance(nx / denom, ny / denom, srf->centroidX, srf->centroidY); //Because we are all reducing, all values should be the same
 }
 
 template<int tile_sz>
@@ -661,7 +662,7 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 
 	float alignmentCosts = srf->WeightAlignment * AlignmentCosts<tile_sz>(group, srf, cfg);
 	
-	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + surfaceAreaCosts + alignmentCosts;
+	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + offlimitsCosts + clearanceCosts + surfaceAreaCosts + alignmentCosts;
 	if (gid == 0) {
 		costs->PairWiseCosts = pairWiseCosts;
 		costs->VisualBalanceCosts = visualBalanceCosts;
