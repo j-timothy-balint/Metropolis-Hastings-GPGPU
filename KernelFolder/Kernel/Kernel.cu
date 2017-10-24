@@ -8,6 +8,9 @@
  * is strictly prohibited.
  *
  */
+/*This code makes several assumptions on the input of our data.
+ * 1)Our warp size is fixed, and the total number of threads is a multiple of the warp size (which is our working group size)
+ */
 
 
 // System includes
@@ -51,6 +54,12 @@ struct vertex
 	double x;
 	double y;
 	double z;
+};
+
+struct BoundingBox //added because several huristics use a min and max point, so this will keep things more cleaned
+{
+	vertex minPoint;
+	vertex maxPoint;
 };
 
 struct rectangle
@@ -403,6 +412,18 @@ __device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *sr
 	return values;
 }
 
+//Calculates the bounding box for a given configuration based on it's rotation
+__inline__ __device__ void calculateBoundingBox(positionAndRotation* cfg, int i, BoundingBox* rect) {
+	double cos_t = fabs(cosf(cfg[i].rotY)); //only want the percent of effect, so we do a fabs
+	double sin_t = fabs(sinf(cfg[i].rotY));
+	double dx = (cfg[i].width * cos_t + cfg[i].length * sin_t)/2.0;
+	double dy = (cfg[i].width * sin_t + cfg[i].length * cos_t)/2.0;
+	rect->minPoint.x = cfg[i].x - dx;
+	rect->minPoint.y = cfg[i].y - dy;
+	rect->maxPoint.x = cfg[i].x + dx;
+	rect->maxPoint.y = cfg[i].y + dy;
+
+}
 
 __device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, vertex rect2Min, vertex rect2Max) {
 	// printf("Clearance rectangle 1: Min X: %f Y: %f Max X: %f Y: %f\n", rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
@@ -414,45 +435,49 @@ __device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, ver
 	float y6 = fminf(rect1Max.y, rect2Max.y);
 
 	return fmaxf(0.0, x6 - x5)*fmaxf(0.0, y6 - y5); //This assume that my positions are all positive, which we certainly cannot do and therefore fail because of this.
-	// Check if proper rectangle, if so it is an intersection.
-	//if (x5 >= x6 || y5 >= y6)
-	//	return 0.0f;
-
-	//printf("Intersection rectangle: Min X: %f Y: %f Max X: %f Y: %f\n", x5, y5, x6, y6);
-
-	// Calculate area and add to error
-	//float area = (x6 - x5) * (y6 - y5);
-	// printf("Area intersection rectangle: %f\n", area);
-	//return area;
 }
 
-__device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, vertex *complementRectangle1, vertex *complementRectangle2, vertex *complementRectangle3, vertex *complementRectangle4) {
+//Going to move the calculations from two vertices to a bounding box
+__inline__ __device__  float calculateIntersectionArea(BoundingBox* rect1, BoundingBox* rect2) {
+	// printf("Clearance rectangle 1: Min X: %f Y: %f Max X: %f Y: %f\n", rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+	// printf("Clearance rectangle 2: Min X: %f Y: %f Max X: %f Y: %f\n", rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
+	// for each two rectangles, find out their intersection. Increase the error using the area
+	float x5 = fmaxf(rect1->minPoint.x, rect2->minPoint.x);
+	float y5 = fmaxf(rect1->minPoint.y, rect2->minPoint.y);
+	float x6 = fminf(rect1->maxPoint.x, rect2->maxPoint.x);
+	float y6 = fminf(rect1->maxPoint.y, rect2->maxPoint.y);
+
+	return fmaxf(0.0, x6 - x5)*fmaxf(0.0, y6 - y5); //This assume that my difference is positive, which it should be for it to be overlapping
+}
+//We are assigning, which is highly parallizable. So we shouldn't need the overhead of the function call
+//Creates the surface area complement rectangle to figure out how much we are off the room
+__inline__ __device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, BoundingBox* rectangles) {
 	// 0 is min value, 1 is max value
-	complementRectangle1[0].x = -DBL_MAX;
-	complementRectangle1[0].y = -DBL_MAX;
-	complementRectangle1[1].x = DBL_MAX;
-	complementRectangle1[1].y = srfRectMin.y;
+	rectangles[0].minPoint.x = -DBL_MAX;
+	rectangles[0].minPoint.y = -DBL_MAX;
+	rectangles[0].maxPoint.x = DBL_MAX;
+	rectangles[0].maxPoint.y = srfRectMin.y;
 
-	complementRectangle2[0].x = -DBL_MAX;
-	complementRectangle2[0].y = srfRectMin.y;
-	complementRectangle2[1].x = srfRectMin.x;
-	complementRectangle2[1].y = srfRectMax.y;
+	rectangles[1].minPoint.x = -DBL_MAX;
+	rectangles[1].minPoint.y = srfRectMin.y;
+	rectangles[1].maxPoint.x = srfRectMin.x;
+	rectangles[1].maxPoint.y = srfRectMax.y;
 
-	complementRectangle3[0].x = -DBL_MAX;
-	complementRectangle3[0].y = srfRectMax.y;
-	complementRectangle3[1].x = DBL_MAX;
-	complementRectangle3[1].y = DBL_MAX;
+	rectangles[2].minPoint.x = -DBL_MAX;
+	rectangles[2].minPoint.y = srfRectMax.y;
+	rectangles[2].maxPoint.x = DBL_MAX;
+	rectangles[2].maxPoint.y = DBL_MAX;
 
-	complementRectangle4[0].x = srfRectMax.x;
-	complementRectangle4[0].y = srfRectMin.y;
-	complementRectangle4[1].x = DBL_MAX;
-	complementRectangle4[1].y = srfRectMax.y;
+	rectangles[3].minPoint.x = srfRectMax.x;
+	rectangles[3].minPoint.y = srfRectMin.y;
+	rectangles[3].maxPoint.x = DBL_MAX;
+	rectangles[3].maxPoint.y = srfRectMax.y;
 }
 
 __device__ vertex minValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
 	vertex rect1;
-	//rect1.x = vertices[startIndexVertices].x;
-	//rect1.y = vertices[startIndexVertices].y;
+	rect1.x = vertices[startIndexVertices].x;
+	rect1.y = vertices[startIndexVertices].y;
 	double second;
 	rect1.z = 0;
 
@@ -466,7 +491,7 @@ __device__ vertex minValue(vertex *vertices, int startIndexVertices, float xtran
 	second  = (vertices[startIndexVertices + 2].y  < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 2].y : vertices[startIndexVertices + 3].y;
 	rect1.y = (rect1.y < second) ? rect1.y : second;
 	rect1.y += ytranslation;
-	//printf("Min value vector after translation: X: %f Y: %f\n", rect1.x, rect1.y);
+	//printf("Min value vector for start at (%f,%f) after translation:(%f,%f)\n", vertices[startIndexVertices].x, vertices[startIndexVertices].y, rect1.x, rect1.y);
 	return rect1;
 }
 
@@ -533,49 +558,38 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
-	vertex complementRectangle1[2];
-	vertex complementRectangle2[2];
-	vertex complementRectangle3[2];
-	vertex complementRectangle4[2];
+	BoundingBox complementRectangle[4];
 
 	// Figure out min and max vectors of surface rectangle
 	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
 	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
 
 	//This gives us the clearence area outside our surface area
-	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle1, complementRectangle2, complementRectangle3, complementRectangle4);
-
+	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle);
+	BoundingBox rect1;
 	for (int i = tid; i < srf->nClearances; i += step) {
 		// Determine max and min vectors of clearance rectangles
 		// rectangle #1
-		//Old way of doing things through a memory error
-		//vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
-		//vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[i].x, cfg[i].y);
-		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-
+		
+		rect1.minPoint = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		rect1.maxPoint = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-
-
-		// printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		for (int j = 0; j < 4; j++) {
+			values += calculateIntersectionArea(&rect1, &complementRectangle[j]);
+		}
 	}
 	//This is meant to get all the objects that do not have a clearence. It also double-counts all the clearence objects
-	for (int j = tid; j < srf->nObjs; j += step) {
+	for (int i = tid; i < srf->nObjs; i += step) {
 		// Determine max and min vectors of off limit rectangles
 		// rectangle #1
 		//offlimits is the size of cfg
-		vertex rect1Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-		vertex rect1Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
+		rect1.minPoint = minValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
+		rect1.maxPoint = maxValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle1[0], complementRectangle1[1]);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle2[0], complementRectangle2[1]);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle3[0], complementRectangle3[1]);
-		values += calculateIntersectionArea(rect1Min, rect1Max, complementRectangle4[0], complementRectangle4[1]);
+		for (int j = 0; j < 4; j++) {
+			values += calculateIntersectionArea(&rect1, &complementRectangle[j]);
+		}
 	}
 
 	group.sync();
@@ -591,30 +605,15 @@ __device__ float OffLimitsCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += step) {
-		vertex rect1Min = minValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
-		vertex rect1Max = maxValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
+		BoundingBox rect1;
+		calculateBoundingBox(cfg, i, &rect1);
 		for (int j = i + 1; j < srf->nObjs; j++) {
-			// Determine max and min vectors of clearance rectangles
-			// rectangle #1
-			//printf("Clearance\n");
-			//printf("Translation: X: %f Y: %f\n", cfg[i].x, cfg[i].y);
-			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-			// rectangle #2
-			//printf("Off limits\n");
-			//printf("Translation: X: %f Y: %f\n", cfg[j].x, cfg[j].y);
-			//offlimits is the size of cfg
-			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-
-			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
-
-			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
-			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
+			BoundingBox rect2;
+			calculateBoundingBox(cfg, j, &rect2);
+			float area = calculateIntersectionArea(&rect1, &rect2);
 			values += area;
 		}
-
 	}
-
 	group.sync();
 	reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
@@ -1243,6 +1242,7 @@ int main(int argc, char **argv)
 
 	const int vertices = (N + NClearances) * 4;
 	vertex vtx[vertices];
+	//clearences are points assuming that the object is at 0,0
 	for (int i = 0; i < (N); i++) {
 		vtx[i*16+0].x = -1.8853001594543457;
 		vtx[i*16 + 0].y = 1.1240049600601196;
@@ -1412,5 +1412,6 @@ int main(int argc, char **argv)
 			result[i].costs.AlignmentCosts,
 			result[i].costs.totalCosts);
 	}
+	system("PAUSE");
  	return EXIT_SUCCESS;
 }
