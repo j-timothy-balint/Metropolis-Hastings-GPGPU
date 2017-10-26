@@ -259,6 +259,7 @@ __device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfa
 	reduce<tile_sz>(group, denom);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
 	
+
 	return  Distance(nx / denom, ny / denom, srf->centroidX, srf->centroidY); //Because we are all reducing, all values should be the same
 }
 
@@ -413,10 +414,10 @@ __device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *sr
 	return values;
 }
 
-//Calculates the bounding box for a given configuration based on it's rotation
+//Calculates the bounding box for a given configuration based on it's rotation, and returns the min and max points
 __inline__ __device__ void calculateBoundingBox(positionAndRotation* cfg, int i, BoundingBox* rect) {
-	double cos_t = fabs(cosf(cfg[i].rotY)); //only want the percent of effect, so we do a fabs
-	double sin_t = fabs(sinf(cfg[i].rotY));
+	double cos_t = fabs(cos(cfg[i].rotY)); //only want the percent of effect, so we do a fabs
+	double sin_t = fabs(sin(cfg[i].rotY));
 	double dx = (cfg[i].width * cos_t + cfg[i].length * sin_t)/2.0;
 	double dy = (cfg[i].width * sin_t + cfg[i].length * cos_t)/2.0;
 	rect->minPoint.x = cfg[i].x - dx;
@@ -426,17 +427,64 @@ __inline__ __device__ void calculateBoundingBox(positionAndRotation* cfg, int i,
 
 }
 
-__device__ float calculateIntersectionArea(vertex rect1Min, vertex rect1Max, vertex rect2Min, vertex rect2Max) {
-	// printf("Clearance rectangle 1: Min X: %f Y: %f Max X: %f Y: %f\n", rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-	// printf("Clearance rectangle 2: Min X: %f Y: %f Max X: %f Y: %f\n", rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
-	// for each two rectangles, find out their intersection. Increase the error using the area
-	float x5 = fmaxf(rect1Min.x, rect2Min.x);
-	float y5 = fmaxf(rect1Min.y, rect2Min.y);
-	float x6 = fminf(rect1Max.x, rect2Max.x);
-	float y6 = fminf(rect1Max.y, rect2Max.y);
+//Calculates the bounding box for a given set of four vertices and a rotation
+__inline__ __device__ void calculateBoundingBox(vertex* verts, int i, double theta, BoundingBox* rect) {
+	double cos_t = fabs(cos(theta)); //only want the percent of effect, so we do a fabs
+	double sin_t = fabs(sin(theta));
+	//At this point, we aren't concerned with the doing the calculations on the convex hull, but on a fitted box 
+	vertex min;
+	min.x = verts[i].x;
+	min.y = verts[i].y;
+	vertex max;
+	max.x = verts[i].x;
+	max.y = verts[i].y;
+	#pragma unroll
+	for (int j = 1; j < 4; j++) { //Can probably do this better, but it's simple enough
+		min.x = (min.x > verts[i + j].x) ? verts[i + j].x : min.x;
+		min.y = (min.y > verts[i + j].y) ? verts[i + j].y : min.y;
+		max.x = (max.x < verts[i + j].x) ? verts[i + j].x : max.x;
+		max.y = (max.y < verts[i + j].y) ? verts[i + j].y : max.y;
+	}
+	//printf("Min is (%f,%f) and Max is (%f,%f)\n", min.x, min.y, max.x, max.y);
+	vertex cent;
+	cent.x = (min.x + max.x) / 2;
+	cent.y = (min.y + max.y) / 2;
+	vertex size;
+	size.x = max.x - min.x;
+	size.y = max.y - min.y;
+	double dx = (size.x * cos_t + size.y * sin_t) / 2.0; //Slightly easier than doing an affine and then calculating the min and max points
+	double dy = (size.x * sin_t + size.y * cos_t) / 2.0;
+	//because we rotate around the projection, we need to do it this way
+	rect->minPoint.x = cent.x - dx;
+	rect->minPoint.y = cent.y - dy;
+	rect->maxPoint.x = cent.x + dx;
+	rect->maxPoint.y = cent.y + dy;
 
-	return fmaxf(0.0, x6 - x5)*fmaxf(0.0, y6 - y5); //This assume that my positions are all positive, which we certainly cannot do and therefore fail because of this.
 }
+
+//From Merrell et al: We use the projection of the item (found in our in bounding box) with a line segment (or disk, but for now a line segment)
+//Since our item is defined as the min and max points on the bounding box, we define the mink sum as adding those projections together
+__inline__ __device__ void MinkowskiSum(vertex *vertices, int i,double theta, BoundingBox* in, BoundingBox* out) {
+	double dx = vertices[i].x * cos(theta) - vertices[i].y * sin(theta); //Our rotation matrix written out
+	double dy = vertices[i].x * sin(theta) + vertices[i].y * cos(theta);
+	out->minPoint.x = in->minPoint.x + dx;
+	out->maxPoint.y = in->maxPoint.y + dy;
+	out->minPoint.x = in->minPoint.x + dx;
+	out->maxPoint.x = in->maxPoint.y + dy;
+}
+
+//From Merrell et al: We use the projection of the item (found in our in bounding box) with a line segment (or disk, but for now a line segment)
+//Since our item is defined as the min and max points on the bounding box, we define the mink sum as adding those projections together
+//We can also do this as the bounding box is the clearance box and the center is the line segment (which is what was sort of being done, but not really)
+__inline__ __device__ void MinkowskiSum(vertex *line, BoundingBox* in, BoundingBox* out) {
+	double dx = line->x; //Our rotation matrix written out
+	double dy = line->y;
+	out->minPoint.x = in->minPoint.x + dx;
+	out->maxPoint.y = in->maxPoint.y + dy;
+	out->minPoint.x = in->minPoint.x + dx;
+	out->maxPoint.x = in->maxPoint.y + dy;
+}
+
 
 //Going to move the calculations from two vertices to a bounding box
 __inline__ __device__  float calculateIntersectionArea(BoundingBox* rect1, BoundingBox* rect2) {
@@ -452,68 +500,29 @@ __inline__ __device__  float calculateIntersectionArea(BoundingBox* rect1, Bound
 }
 //We are assigning, which is highly parallizable. So we shouldn't need the overhead of the function call
 //Creates the surface area complement rectangle to figure out how much we are off the room
-__inline__ __device__ void createComplementRectangle(vertex srfRectMin, vertex srfRectMax, BoundingBox* rectangles) {
+__inline__ __device__ void createComplementRectangle(BoundingBox* srfRect, BoundingBox* rectangles) {
 	// 0 is min value, 1 is max value
 	rectangles[0].minPoint.x = -DBL_MAX;
 	rectangles[0].minPoint.y = -DBL_MAX;
 	rectangles[0].maxPoint.x = DBL_MAX;
-	rectangles[0].maxPoint.y = srfRectMin.y;
+	rectangles[0].maxPoint.y = srfRect->minPoint.y;
 
 	rectangles[1].minPoint.x = -DBL_MAX;
-	rectangles[1].minPoint.y = srfRectMin.y;
-	rectangles[1].maxPoint.x = srfRectMin.x;
-	rectangles[1].maxPoint.y = srfRectMax.y;
+	rectangles[1].minPoint.y = srfRect->minPoint.y;
+	rectangles[1].maxPoint.x = srfRect->minPoint.x;
+	rectangles[1].maxPoint.y = srfRect->maxPoint.y;
 
 	rectangles[2].minPoint.x = -DBL_MAX;
-	rectangles[2].minPoint.y = srfRectMax.y;
+	rectangles[2].minPoint.y = srfRect->maxPoint.y;
 	rectangles[2].maxPoint.x = DBL_MAX;
 	rectangles[2].maxPoint.y = DBL_MAX;
 
-	rectangles[3].minPoint.x = srfRectMax.x;
-	rectangles[3].minPoint.y = srfRectMin.y;
+	rectangles[3].minPoint.x = srfRect->maxPoint.x;
+	rectangles[3].minPoint.y = srfRect->minPoint.y;
 	rectangles[3].maxPoint.x = DBL_MAX;
-	rectangles[3].maxPoint.y = srfRectMax.y;
+	rectangles[3].maxPoint.y = srfRect->maxPoint.y;
 }
 
-__device__ vertex minValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
-	vertex rect1;
-	rect1.x = vertices[startIndexVertices].x;
-	rect1.y = vertices[startIndexVertices].y;
-	double second;
-	rect1.z = 0;
-
-	//Since the original authors decided to unroll the loop, we will continue with that idea
-	rect1.x = (vertices[startIndexVertices].x < vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices].x : vertices[startIndexVertices + 1].x;
-	second  =  (vertices[startIndexVertices + 2].x  < vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 2].x : vertices[startIndexVertices + 3].x;
-	rect1.x = (rect1.x < second) ? rect1.x : second;
-	rect1.x += xtranslation;
-
-	rect1.y = (vertices[startIndexVertices].y < vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices].y : vertices[startIndexVertices + 1].y;
-	second  = (vertices[startIndexVertices + 2].y  < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 2].y : vertices[startIndexVertices + 3].y;
-	rect1.y = (rect1.y < second) ? rect1.y : second;
-	rect1.y += ytranslation;
-	//printf("Min value vector for start at (%f,%f) after translation:(%f,%f)\n", vertices[startIndexVertices].x, vertices[startIndexVertices].y, rect1.x, rect1.y);
-	return rect1;
-}
-
-__device__ vertex maxValue(vertex *vertices, int startIndexVertices, float xtranslation, float ytranslation) {
-	vertex rect1;
-	double second;
-	rect1.z = 0;
-
-	//Since the original authors decided to unroll the loop, we will continue with that idea
-	rect1.x = (vertices[startIndexVertices].x < vertices[startIndexVertices + 1].x) ? vertices[startIndexVertices + 1].x : vertices[startIndexVertices].x;
-	second = (vertices[startIndexVertices + 2].x  < vertices[startIndexVertices + 3].x) ? vertices[startIndexVertices + 3].x : vertices[startIndexVertices + 2].x;
-	rect1.x = (rect1.x < second) ? second : rect1.x;
-	rect1.x += xtranslation;
-
-	rect1.y = (vertices[startIndexVertices].y < vertices[startIndexVertices + 1].y) ? vertices[startIndexVertices + 1].y : vertices[startIndexVertices + 1].y;
-	second = (vertices[startIndexVertices + 2].y  < vertices[startIndexVertices + 3].y) ? vertices[startIndexVertices + 3].y : vertices[startIndexVertices + 2].y;
-	rect1.y = (rect1.y < second) ? second : rect1.y;
-	rect1.y += ytranslation;
-	//printf("Max value vector after translation: X: %f Y: %f\n", rect1.x, rect1.y);
-	return rect1;
-}
 
 // Clearance costs is calculated by determining any intersections between clearances and offlimits. Clearances may overlap with other clearances
 template<int tile_sz>
@@ -524,22 +533,15 @@ __device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nClearances; i+=step) {
-		vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-		vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		BoundingBox rect1; //The starting bounding box
+		calculateBoundingBox(cfg, clearances[i].SourceIndex, &rect1);
+		MinkowskiSum(vertices, clearances[i].point1Index,cfg[clearances[i].SourceIndex].rotY, &rect1, &rect1);
+		//vertex rect1Min = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		//vertex rect1Max = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 		for (int j = 0; j < srf->nObjs; j ++) {
-			vertex rect2Min = minValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-			vertex rect2Max = maxValue(vertices, offlimits[j].point1Index, cfg[j].x, cfg[j].y);
-			// Determine max and min vectors of clearance rectangles
-			// rectangle #1
-			//printf("Clearance\n");
-			//printf("Translation: X: %f Y: %f\n", cfg[i].x, cfg[i].y);
-			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
-			// rectangle #2
-			//printf("Off limits\n");
-			//printf("Translation: X: %f Y: %f\n", cfg[j].x, cfg[j].y);
-			// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect2Min.x, rect2Min.y, rect2Max.x, rect2Max.y);
-			float area = calculateIntersectionArea(rect1Min, rect1Max, rect2Min, rect2Max);
-			//printf("Area intersection rectangle %d and %d: %f\n", i, j, area);
+			BoundingBox rect2; //The starting bounding box
+			calculateBoundingBox(cfg, j, &rect2);
+			float area = calculateIntersectionArea(&rect1,&rect2);
 			values += area; //Clearence penalty should be positive
 		}
 	}
@@ -559,21 +561,25 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
+	BoundingBox rect;
 	BoundingBox complementRectangle[4];
-
-	// Figure out min and max vectors of surface rectangle
-	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
-	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
+	calculateBoundingBox(surfaceRectangle, 0, 0, &rect);
 
 	//This gives us the clearence area outside our surface area
-	createComplementRectangle(srfRect1Min, srfRect1Max, complementRectangle);
+	createComplementRectangle(&rect, complementRectangle);
 	BoundingBox rect1;
 	for (int i = tid; i < srf->nClearances; i += step) {
 		// Determine max and min vectors of clearance rectangles
 		// rectangle #1
-		
-		rect1.minPoint = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
-		rect1.maxPoint = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		vertex item;
+		item.x = cfg[clearances[i].SourceIndex].x;
+		item.y = cfg[clearances[i].SourceIndex].y;
+		calculateBoundingBox(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].rotY, &rect1);
+		MinkowskiSum(&item, &rect1, &rect1);
+		//calculateBoundingBox(cfg, clearances[i].SourceIndex, &rect1);
+		//MinkowskiSum(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].rotY, &rect1, &rect1);
+		//rect1.minPoint = minValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
+		//rect1.maxPoint = maxValue(vertices, clearances[i].point1Index, cfg[clearances[i].SourceIndex].x, cfg[clearances[i].SourceIndex].y);
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 		for (int j = 0; j < 4; j++) {
 			values += calculateIntersectionArea(&rect1, &complementRectangle[j]);
@@ -584,8 +590,7 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 		// Determine max and min vectors of off limit rectangles
 		// rectangle #1
 		//offlimits is the size of cfg
-		rect1.minPoint = minValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
-		rect1.maxPoint = maxValue(vertices, offlimits[i].point1Index, cfg[i].x, cfg[i].y);
+		calculateBoundingBox(cfg, i, &rect1);
 
 		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
 		for (int j = 0; j < 4; j++) {
@@ -628,55 +633,40 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 	//float pairWiseCosts = 0;
 	float pairWiseCosts =  PairWiseTotalCosts<tile_sz>(group, srf, cfg, rs);
 	pairWiseCosts *= srf->WeightPairWise;
-
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
-
 	//float visualBalanceCosts = 0;
 	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts<tile_sz>(group, srf, cfg);
-	
 	// printf("Visual balance costs with weight %f\n", visualBalanceCosts);
-
 	//float focalPointCosts = 0;
 	float focalPointCosts = srf->WeightFocalPoint * FocalPointCosts<tile_sz>(group, srf, cfg);
-	
 	// printf("Focal point costs with weight %f\n", focalPointCosts);
-
 	//float symmertryCosts = 0;
 	float symmertryCosts = srf->WeightSymmetry * SymmetryCosts<tile_sz>(group, srf, cfg);
-	
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
-
 	//float offlimitsCosts = 0;
 	float offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts<tile_sz>(group, srf, cfg, vertices, offlimits);
 	//printf("OffLimits costs with weight %f\n", offlimitsCosts);
-	
-
 	//float clearanceCosts = 0;
 	float clearanceCosts = srf->WeightClearance * ClearanceCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits);
-	
-	
-
 	//float surfaceAreaCosts = 0;
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
-
 	float alignmentCosts = srf->WeightAlignment * AlignmentCosts<tile_sz>(group, srf, cfg);
-	
-	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + offlimitsCosts + clearanceCosts + surfaceAreaCosts + alignmentCosts;
+	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + offlimitsCosts  + surfaceAreaCosts + alignmentCosts;
+
 	if (gid == 0) {
 		costs->PairWiseCosts = pairWiseCosts;
 		costs->VisualBalanceCosts = visualBalanceCosts;
 		costs->FocalPointCosts = focalPointCosts;
 		costs->SymmetryCosts = symmertryCosts;
+		costs->ClearanceCosts = clearanceCosts;
 		costs->OffLimitsCosts = offlimitsCosts;
 		//printf("OffLimits costs with weight %f\n", offlimitsCosts);
-		costs->ClearanceCosts = clearanceCosts;
 		//printf("Clearance costs with weight %f\n", clearanceCosts);
 		costs->SurfaceAreaCosts = surfaceAreaCosts;
 		costs->AlignmentCosts = alignmentCosts;
 		costs->totalCosts = totalCosts;
 		//printf("Total costs is %f\n", totalCosts);
-		
 	}
 	group.sync();
 	
@@ -689,11 +679,9 @@ __device__ void CopyCosts(resultCosts* copyFrom, resultCosts* copyTo)
 	copyTo->PairWiseCosts = copyFrom->PairWiseCosts;
 	copyTo->VisualBalanceCosts = copyFrom->VisualBalanceCosts;
 	copyTo->FocalPointCosts = copyFrom->FocalPointCosts;
-	copyTo->SymmetryCosts = copyFrom->SymmetryCosts;
-	//printf("Copying Clearance costs with weight %f\n", copyFrom->ClearanceCosts);
+	copyTo->SymmetryCosts = copyFrom->SymmetryCosts;;
 	copyTo->ClearanceCosts = copyFrom->ClearanceCosts;
 	copyTo->OffLimitsCosts = copyFrom->OffLimitsCosts;
-	//printf("Copying Surface area costs with weight %f\n", copyFrom->SurfaceAreaCosts);
 	copyTo->SurfaceAreaCosts = copyFrom->SurfaceAreaCosts;
 	copyTo->AlignmentCosts = copyFrom->AlignmentCosts;
 	copyTo->totalCosts = copyFrom->totalCosts;
@@ -734,10 +722,10 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 	p = group.shfl(p, 0); //broadcast out to p
 	//group.sync(); shlf_sync is broadcast and so should sync
 	// Determine width and length of surface rectangle
-	vertex srfRect1Min = minValue(surfaceRectangle, 0, 0, 0);
-	vertex srfRect1Max = maxValue(surfaceRectangle, 0, 0, 0);
-	float width = srfRect1Max.x - srfRect1Min.x;
-	float height = srfRect1Max.y - srfRect1Min.y;
+	BoundingBox srfRect;
+	calculateBoundingBox(surfaceRectangle, 0, 0, &srfRect);
+	float width  = srfRect.maxPoint.x - srfRect.minPoint.x;
+	float height = srfRect.maxPoint.y - srfRect.minPoint.y;
 	// Dividing the width by 2 makes sure that it stays withing a 95% percentile range that is usable, dividing it by 4 makes sure that it stretches the half of the length/width or lower (and that inside a 95% interval).
 	float stdXAxis = width / 16;
 	float stdYAxis = height / 16;
@@ -767,8 +755,8 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 			float dy = curand_normal(&rngStates[tid]);
 			cfg[obj].y += dy * stdYAxis;
 			// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
-			cfg[obj].x = clamp(cfg[obj].x, srfRect1Min.x, srfRect1Max.x); //xClamps
-			cfg[obj].y = clamp(cfg[obj].y, srfRect1Min.y, srfRect1Max.y); //yClamps
+			cfg[obj].x = clamp(cfg[obj].x, srfRect.minPoint.x, srfRect.maxPoint.x); //xClamps
+			cfg[obj].y = clamp(cfg[obj].y, srfRect.minPoint.y, srfRect.maxPoint.y); //yClamps
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].rotY, cfgStar[obj].rotZ);
 	}
@@ -872,7 +860,7 @@ __device__ bool Accept(double costStar, double costCur, curandState *rngStates, 
 	//printf("Random number: %f\n", randomNumber);
 	//In reality, it should be -beta, because that is the boltsmann dist. However, that has the effect of favoring star configurations that are 
 	//higher cost than the current. We are trying to minimize, so beta should be positive. This way, we only accept higher costs on low betas
-	return  randomNumber < fminf(1.0f, expf(beta * (costCur - costStar)));
+	return  randomNumber < fminf(1.0f, expf(-beta * (costStar - costCur)));
 }
 
 template<int tile_sz>
@@ -913,7 +901,7 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 							// Copy best config (now set to input config) to result of this block
 
 	bool accept;
-	float beta = generateRandomFloatInRange(rngStates, tid, 3, 0);
+	float beta = generateRandomFloatInRange(rngStates, tid, 2, 0.001); //We get a beta value between hot (accept if it is better or 
 	beta = group.shfl(beta, 0);//shf calls shfl_sync, which as a broadcast should sync
 	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
 
@@ -929,6 +917,8 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
 		if (gtid == 0) {
 			accept = Accept(starCosts->totalCosts, bestCosts->totalCosts, rngStates, tid,beta);
+			//if(accept)
+			//	printf("Star accepted, cost goes from %f -> %f\n", bestCosts->totalCosts, starCosts->totalCosts);
 
 		}
 		accept = group.shfl(accept, 0);
@@ -937,12 +927,13 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 			// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
 			//printf("Star accepted as new current.\n");
 			// Copy star into current
+			
 			Copy<tile_sz>(group, cfgBest, cfgStar, srf);
 			CopyCosts(starCosts, bestCosts);
 		}
 		else { //Reject it
 			Copy<tile_sz>(group, cfgStar, cfgBest, srf);
-			//CopyCosts(bestCosts, starCosts);
+			//CopyCosts(bestCosts, starCosts); //We re-run the costs, so no need to copy it
 		}
 
 		// Check whether we continue with current or we continue with star
@@ -1243,7 +1234,8 @@ int main(int argc, char **argv)
 
 	const int vertices = (N + NClearances) * 4;
 	vertex vtx[vertices];
-	//clearences are points assuming that the object is at 0,0
+	//clearences were points assuming the object was at 0. Now they are vectors considered from the bounding box of the object
+	//which is how it is written in the paper
 	for (int i = 0; i < (N); i++) {
 		vtx[i*16+0].x = -1.8853001594543457;
 		vtx[i*16 + 0].y = 1.1240049600601196;
