@@ -178,11 +178,9 @@ __inline__ __device__ float clamp(float value, float min, float max) {
 	return fminf(max, fmaxf(value, min));
 }
 
-__device__ float Distance(float xi, float yi, float xj, float yj)
+__inline__ __device__ float Distance(float xi, float yi, float xj, float yj)
 {
-	float dX = xi - xj;
-	float dY = yi - yj;
-	return sqrtf(dX * dX + dY * dY);
+	return hypotf(xi - xj, yi - yj);
 }
 
 //Determines the angular difference between two objects where i is oriented to j (i is bearing to j)
@@ -201,7 +199,7 @@ __device__ float theta(float xi, float yi, float xj, float yj, float ti) {
 }
 
 // Tj is the rotation
-__device__ float phi(float xi, float yi, float xj, float yj, float tj)
+__inline__ __device__ float phi(float xi, float yi, float xj, float yj, float tj)
 {
 	return atan2f(yi - yj, xi - xj) - tj + PI / 2.0;
 }
@@ -311,14 +309,14 @@ __device__ float PairWiseTotalCosts(cg::thread_block_tile<tile_sz> group, Surfac
 		float angle = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y, cfg[rs[i].TargetIndex].rotY);
 		
 		//Score distance calculation
-		float score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
-		score        = (distance > rs[i].TargetRange.targetRangeEnd)   ? powf(rs[i].TargetRange.targetRangeEnd / distance  , rs[i].DegreesOfAtrraction)  : 1.0;
+		float score  = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
+		score        = (distance > rs[i].TargetRange.targetRangeEnd)   ? powf(rs[i].TargetRange.targetRangeEnd / distance  , rs[i].DegreesOfAtrraction)  : score;
 
 		//For now, we assume start is greater than end
 		float norm    = fabs(rs[i].AngleRange.targetRangeEnd - rs[i].AngleRange.targetRangeStart)/2.0; //The max distance away is half the slice that is in the no zone 
 		norm = (2.0 * PI - norm) / 2.0;
-		float a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(angle- rs[i].AngleRange.targetRangeStart),
-																													 fabs(angle - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
+		float a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fminf(fabsf(angle- rs[i].AngleRange.targetRangeStart),
+																													 fabsf(angle - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
 		values -= score*a_score; //So, best score we can do is -1, and everything else degrades from there
 	}
 	group.sync();
@@ -336,13 +334,13 @@ __device__ double FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface 
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += step)
 	{
-		double phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
+		float phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
 		// Old implementation of grouping, all objects that belong to the seat category are used in the focal point calculation
 		// For now we default to all objects, focal point grouping will come later
 		//int s_i = s(r.c[i]);
 
 		// sum += s_i * cos(phi_fi);
-		values -= cos(phi_fi);
+		values -= cosf(phi_fi);
 	}
 	group.sync();
 	values = reduce<tile_sz>(group, values);
@@ -352,17 +350,17 @@ __device__ double FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface 
 }
 
 template<int tile_sz>
-__device__ double SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg)
+__device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg)
 {
 	int tid = group.thread_rank();
 	int step = group.size();
-	double values =0.0;
+	float values =0.0;
 	for (int i = tid; i < srf->nObjs; i += step)
 	{
-		double maxVal = 0;
+		float maxVal = 0;
 
-		double ux = cos(srf->focalRot);
-		double uy = sin(srf->focalRot);
+		float ux = cosf(srf->focalRot);
+		float uy = sinf(srf->focalRot);
 		float s = 2 * (srf->focalX * ux + srf->focalY * uy - (cfg[i].x * ux + cfg[i].y * uy));  // s = 2 * (f * u - v * u)
 
 																								// r is the reflection of g across the symmetry axis defined by p.
@@ -444,9 +442,9 @@ __inline__ __device__ void calculateBoundingBox(vertex* verts, int i, float thet
 
 //From Merrell et al: We use the projection of the item (found in our in bounding box) with a line segment (or disk, but for now a line segment)
 //Since our item is defined as the min and max points on the bounding box, we define the mink sum as adding those projections together
-__inline__ __device__ void MinkowskiSum(vertex *vertices, int i,double theta, BoundingBox* in, BoundingBox* out) {
-	double dx = vertices[i].x * cos(theta) - vertices[i].y * sin(theta); //Our rotation matrix written out
-	double dy = vertices[i].x * sin(theta) + vertices[i].y * cos(theta);
+__inline__ __device__ void MinkowskiSum(vertex *vertices, int i,float theta, BoundingBox* in, BoundingBox* out) {
+	float dx = vertices[i].x * cos(theta) - vertices[i].y * sin(theta); //Our rotation matrix written out
+	float dy = vertices[i].x * sin(theta) + vertices[i].y * cos(theta);
 	out->minPoint.x = in->minPoint.x + dx;
 	out->maxPoint.y = in->maxPoint.y + dy;
 	out->minPoint.x = in->minPoint.x + dx;
@@ -457,8 +455,8 @@ __inline__ __device__ void MinkowskiSum(vertex *vertices, int i,double theta, Bo
 //Since our item is defined as the min and max points on the bounding box, we define the mink sum as adding those projections together
 //We can also do this as the bounding box is the clearance box and the center is the line segment (which is what was sort of being done, but not really)
 __inline__ __device__ void MinkowskiSum(vertex *line, BoundingBox* in, BoundingBox* out) {
-	double dx = line->x; //Our rotation matrix written out
-	double dy = line->y;
+	float dx = line->x; //Our rotation matrix written out
+	float dy = line->y;
 	out->minPoint.x = in->minPoint.x + dx;
 	out->maxPoint.y = in->maxPoint.y + dy;
 	out->minPoint.x = in->minPoint.x + dx;
@@ -727,9 +725,6 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 		int mask = group.ballot(!cfg[obj].frozen);
 		int leader = __ffs(mask);
 		obj = group.shfl(obj, leader);
-
-
-		
 		if (gid == 0) {
 			//printf("Selected object #: %d\n", obj);
 			float dx = curand_normal(&rngStates[tid]);
@@ -1205,13 +1200,13 @@ int main(int argc, char **argv)
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
 
-	const int dimensions = 1;
+	const int dimensions = 16;
 
 	gpuConfig gpuCfg;
 
 	gpuCfg.gridxDim = dimensions;
 	gpuCfg.gridyDim = 0;
-	gpuCfg.blockxDim = 1*WARP_SIZE;
+	gpuCfg.blockxDim = 4*WARP_SIZE;
 	gpuCfg.blockyDim = 0;
 	gpuCfg.blockzDim = 0;
 	gpuCfg.iterations = 1000;//a 10th of what they claimed in the paper
@@ -1405,6 +1400,6 @@ int main(int argc, char **argv)
 			result[i].costs.AlignmentCosts,
 			result[i].costs.totalCosts);
 		}
-	system("PAUSE");
+	//system("PAUSE");
  	return EXIT_SUCCESS;
 }
