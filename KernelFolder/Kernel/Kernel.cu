@@ -51,9 +51,9 @@ namespace cg = cooperative_groups;
 
 struct vertex
 {
-	double x;
-	double y;
-	double z;
+	float x;
+	float y;
+	float z;
 };
 
 struct BoundingBox //added because several huristics use a min and max point, so this will keep things more cleaned
@@ -73,22 +73,22 @@ struct rectangle
 
 struct positionAndRotation
 {
-	double x;
-	double y;
-	double z;
+	float x;
+	float y;
+	float z;
 
-	double rotX;
-	double rotY;
-	double rotZ;
+	float rotX;
+	float rotY;
+	float rotZ;
 	bool frozen;
 
-	double length;
-	double width;
+	float length;
+	float width;
 };
 
 struct targetRangeStruct {
-	double targetRangeStart;
-	double targetRangeEnd;
+	float targetRangeStart;
+	float targetRangeEnd;
 };
 
 struct relationshipStruct
@@ -97,7 +97,7 @@ struct relationshipStruct
 	targetRangeStruct AngleRange;
 	int SourceIndex;
 	int TargetIndex;
-	double DegreesOfAtrraction;
+	int DegreesOfAtrraction;
 };
 
 struct Surface
@@ -117,13 +117,13 @@ struct Surface
 	float WeightAlignment;
 
 	// Centroid
-	double centroidX;
-	double centroidY;
+	float centroidX;
+	float centroidY;
 
 	// Focal point
-	double focalX;
-	double focalY;
-	double focalRot;
+	float focalX;
+	float focalY;
+	float focalRot;
 };
 
 struct gpuConfig
@@ -141,8 +141,8 @@ struct point
 	float x, y, z, rotX, rotY, rotZ;
 	bool frozen;
 
-	double length;
-	double width;
+	float length;
+	float width;
 };
 
 struct resultCosts
@@ -174,28 +174,28 @@ __global__ void initRNG(curandState *const rngStates, const unsigned int seed)
 }
 
 //Given the prevalance in graphics, I'm really surprised this isn't a standard function in cuda
-__inline__ __device__ double clamp(double value, double min, double max) {
+__inline__ __device__ float clamp(float value, float min, float max) {
 	return fminf(max, fmaxf(value, min));
 }
 
-__device__ double Distance(float xi, float yi, float xj, float yj) 
+__device__ float Distance(float xi, float yi, float xj, float yj)
 {
-	double dX = xi - xj;
-	double dY = yi - yj;
-	return sqrt(dX * dX + dY * dY);
+	float dX = xi - xj;
+	float dY = yi - yj;
+	return sqrtf(dX * dX + dY * dY);
 }
 
 //Determines the angular difference between two objects where i is oriented to j (i is bearing to j)
-__device__ double theta(float xi, float yi, float xj, float yj, float ti) {
-	double dX = xi - xj;
-	double dY = yi - yj;
-	double theta_p = atan2(dY, dX); //gives us the angle between -PI and PI
+__device__ float theta(float xi, float yi, float xj, float yj, float ti) {
+	float dX = xi - xj;
+	float dY = yi - yj;
+	float theta_p = atan2f(dY, dX); //gives us the angle between -PI and PI
 
 									//and now between 0 and 2*pi
 	theta_p = (theta_p < 0) ? 2 * PI + theta_p : theta_p;
 	//printf("theta_p=%f,ti=%f\n",theta_p,ti);
 	//return the re-oriented angle
-	double theta = theta_p - ti;
+	float theta = theta_p - ti;
 	return (theta < 0) ? 2 * PI + theta : theta;
 
 }
@@ -203,7 +203,7 @@ __device__ double theta(float xi, float yi, float xj, float yj, float ti) {
 // Tj is the rotation
 __device__ float phi(float xi, float yi, float xj, float yj, float tj)
 {
-	return atan2(yi - yj, xi - xj) - tj + PI / 2.0;
+	return atan2f(yi - yj, xi - xj) - tj + PI / 2.0;
 }
 
 //To get coop groups working, we need to remove the useage of shared memory. We can do this using a shuffle/reduce
@@ -216,26 +216,8 @@ template<int tile_sz>
 	return val;
 }
 
-//Modest reduction algorithm with a lot of room to improve upon
-/*__device__ void reduce(cg::thread_group group,float *values, int n) { //Size of the array (from how we use it, it's at most of size blockDim.x)
-	int stride = group.size()/2;
-	int tid = group.thread_rank();
-	int size = n;
-	//We make the very important for parallel reduction assumptions that blockDim is a power of two and values is a multiple of blockdim
-	//We can do this because we control those
-	while (size > 1) {
-		for (int i = tid + stride; i < size; i += stride) {
-			values[tid] += values[i];
-			//printf("tid = %d with value %f\n", tid, values);
-		}
-		size = size / 2;
-		stride = stride / 2;
-		group.sync();
-		//local variable per thread, so no race condition
-	}
-}*/
 template<int tile_sz>
-__device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg)
+__device__ float VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg)
 {
 	int tid =  group.thread_rank();
 	int step = group.size();
@@ -254,9 +236,9 @@ __device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfa
 		denom += area;
 	}
 	group.sync();
-	reduce<tile_sz>(group, nx);
-	reduce<tile_sz>(group, ny);
-	reduce<tile_sz>(group, denom);
+	nx = reduce<tile_sz>(group, nx);
+	ny = reduce<tile_sz>(group, ny);
+	denom = reduce<tile_sz>(group, denom);
 	// Distance between all summed areas and points divided by the areas and the room's centroid
 	
 
@@ -264,22 +246,22 @@ __device__ double VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfa
 }
 
 template<int tile_sz>
-__device__ double AlignmentCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg) {
+__device__ float AlignmentCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg) {
 	int tid = group.thread_rank();
 	int step = group.size();
-	double costs = 0.0;
+	float costs = 0.0;
 	for (int i = tid; i < srf->nObjs; i += step) { //Eventually, this will transform into groups
 		for (int j = 0; j < srf->nObjs; j += step) {
 			costs += cosf(4 * cfg[i].rotY - cfg[j].rotY);
 		}
 	}
 	group.sync();
-	reduce<tile_sz>(group, costs);
+	costs = reduce<tile_sz>(group, costs);
 	return -costs;
 }
 
 template<int tile_sz>
-__device__ double PairWiseCosts(cg::thread_block_tile<tile_sz> group,Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
+__device__ float PairWiseCosts(cg::thread_block_tile<tile_sz> group,Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
 	int tid = group.thread_rank();
 	int step = group.size();
@@ -288,18 +270,18 @@ __device__ double PairWiseCosts(cg::thread_block_tile<tile_sz> group,Surface *sr
 	for (int i = 0; i < srf->nRelationships; i+=step)
 	{
 		// Look up source index from relationship and retrieve object using that index.
-		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
+		float distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
 		//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
 		//penalize if we are too close
 		if (distance < rs[i].TargetRange.targetRangeStart)
 		{
-			double fraction = distance / rs[i].TargetRange.targetRangeStart;
+			float fraction = distance / rs[i].TargetRange.targetRangeStart;
 			values -= (fraction * fraction);
 		}
 		//penalize if we are too far
 		else if (distance > rs[i].TargetRange.targetRangeEnd)
 		{
-			double fraction = rs[i].TargetRange.targetRangeEnd / distance;
+			float fraction = rs[i].TargetRange.targetRangeEnd / distance;
 			values -= (fraction * fraction);
 		}
 		else {
@@ -308,40 +290,39 @@ __device__ double PairWiseCosts(cg::thread_block_tile<tile_sz> group,Surface *sr
 		// Else don't do anything as 0 indicates a perfect solution
 	}
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
-	return (double)values;
+	return values;
 }
 
 //This functional principle uses a lookup (relationshipStruct) to determine weights from a recommended angle
 //This is not the facing angle but the distance angle (so, the target rotated around the source)
 template<int tile_sz>
-__device__ double PairWiseTotalCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
+__device__ float PairWiseTotalCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg, relationshipStruct *rs)
 {
 	int tid = group.thread_rank();
 	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	float values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 						//assuming (0,2*PI]
 	for (int i = tid; i < srf->nRelationships; i += step)
 	{
 		// We use phi to calculate the angle between the rotation of the object and the target object
-		double distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
-		double angle = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y, cfg[rs[i].TargetIndex].rotY);
+		float distance = Distance(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y);
+		float angle = theta(cfg[rs[i].SourceIndex].x, cfg[rs[i].SourceIndex].y, cfg[rs[i].TargetIndex].x, cfg[rs[i].TargetIndex].y, cfg[rs[i].TargetIndex].rotY);
 		
 		//Score distance calculation
-		double score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
+		float score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
 		score        = (distance > rs[i].TargetRange.targetRangeEnd)   ? powf(rs[i].TargetRange.targetRangeEnd / distance  , rs[i].DegreesOfAtrraction)  : 1.0;
 
 		//For now, we assume start is greater than end
-		double norm    = fabs(rs[i].AngleRange.targetRangeEnd - rs[i].AngleRange.targetRangeStart)/2.0; //The max distance away is half the slice that is in the no zone 
+		float norm    = fabs(rs[i].AngleRange.targetRangeEnd - rs[i].AngleRange.targetRangeStart)/2.0; //The max distance away is half the slice that is in the no zone 
 		norm = (2.0 * PI - norm) / 2.0;
-		double a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(angle- rs[i].AngleRange.targetRangeStart), 
+		float a_score = (rs[i].AngleRange.targetRangeEnd < angle || angle < rs[i].AngleRange.targetRangeEnd) ? fmin(fabs(angle- rs[i].AngleRange.targetRangeStart),
 																													 fabs(angle - rs[i].AngleRange.targetRangeEnd)) / norm : 1.0;
 		values -= score*a_score; //So, best score we can do is -1, and everything else degrades from there
 	}
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -351,11 +332,11 @@ __device__ double FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface 
 {
 	int tid = group.thread_rank();
 	int step = group.size();
-	float values;
+	double values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += step)
 	{
-		float phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
+		double phi_fi = phi(srf->focalX, srf->focalY, cfg[i].x, cfg[i].y, cfg[i].rotY);
 		// Old implementation of grouping, all objects that belong to the seat category are used in the focal point calculation
 		// For now we default to all objects, focal point grouping will come later
 		//int s_i = s(r.c[i]);
@@ -364,25 +345,24 @@ __device__ double FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface 
 		values -= cos(phi_fi);
 	}
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("tid = %d, value = %f\n", tid, values[tid]);
 	//printf("Clearance costs error: %f\n", error);
-	return (double)values;
+	return values;
 }
 
 template<int tile_sz>
-__device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg)
+__device__ double SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation* cfg)
 {
 	int tid = group.thread_rank();
 	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	double values =0.0;
 	for (int i = tid; i < srf->nObjs; i += step)
 	{
-		float maxVal = 0;
+		double maxVal = 0;
 
-		float ux = cos(srf->focalRot);
-		float uy = sin(srf->focalRot);
+		double ux = cos(srf->focalRot);
+		double uy = sin(srf->focalRot);
 		float s = 2 * (srf->focalX * ux + srf->focalY * uy - (cfg[i].x * ux + cfg[i].y * uy));  // s = 2 * (f * u - v * u)
 
 																								// r is the reflection of g across the symmetry axis defined by p.
@@ -409,17 +389,17 @@ __device__ float SymmetryCosts(cg::thread_block_tile<tile_sz> group, Surface *sr
 	}
 
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
 
 //Calculates the bounding box for a given configuration based on it's rotation, and returns the min and max points
 __inline__ __device__ void calculateBoundingBox(positionAndRotation* cfg, int i, BoundingBox* rect) {
-	double cos_t = fabs(cos(cfg[i].rotY)); //only want the percent of effect, so we do a fabs
-	double sin_t = fabs(sin(cfg[i].rotY));
-	double dx = (cfg[i].width * cos_t + cfg[i].length * sin_t)/2.0;
-	double dy = (cfg[i].width * sin_t + cfg[i].length * cos_t)/2.0;
+	float cos_t = fabsf(cosf(cfg[i].rotY)); //only want the percent of effect, so we do a fabs
+	float sin_t = fabsf(sinf(cfg[i].rotY));
+	float dx = (cfg[i].width * cos_t + cfg[i].length * sin_t)/2.0;
+	float dy = (cfg[i].width * sin_t + cfg[i].length * cos_t)/2.0;
 	rect->minPoint.x = cfg[i].x - dx;
 	rect->minPoint.y = cfg[i].y - dy;
 	rect->maxPoint.x = cfg[i].x + dx;
@@ -428,9 +408,9 @@ __inline__ __device__ void calculateBoundingBox(positionAndRotation* cfg, int i,
 }
 
 //Calculates the bounding box for a given set of four vertices and a rotation
-__inline__ __device__ void calculateBoundingBox(vertex* verts, int i, double theta, BoundingBox* rect) {
-	double cos_t = fabs(cos(theta)); //only want the percent of effect, so we do a fabs
-	double sin_t = fabs(sin(theta));
+__inline__ __device__ void calculateBoundingBox(vertex* verts, int i, float theta, BoundingBox* rect) {
+	float cos_t = fabsf(cosf(theta)); //only want the percent of effect, so we do a fabs
+	float sin_t = fabsf(sinf(theta));
 	//At this point, we aren't concerned with the doing the calculations on the convex hull, but on a fitted box 
 	vertex min;
 	min.x = verts[i].x;
@@ -452,8 +432,8 @@ __inline__ __device__ void calculateBoundingBox(vertex* verts, int i, double the
 	vertex size;
 	size.x = max.x - min.x;
 	size.y = max.y - min.y;
-	double dx = (size.x * cos_t + size.y * sin_t) / 2.0; //Slightly easier than doing an affine and then calculating the min and max points
-	double dy = (size.x * sin_t + size.y * cos_t) / 2.0;
+	float dx = (size.x * cos_t + size.y * sin_t) / 2.0; //Slightly easier than doing an affine and then calculating the min and max points
+	float dy = (size.x * sin_t + size.y * cos_t) / 2.0;
 	//because we rotate around the projection, we need to do it this way
 	rect->minPoint.x = cent.x - dx;
 	rect->minPoint.y = cent.y - dy;
@@ -495,31 +475,31 @@ __inline__ __device__  float calculateIntersectionArea(BoundingBox* rect1, Bound
 	float y5 = fmaxf(rect1->minPoint.y, rect2->minPoint.y);
 	float x6 = fminf(rect1->maxPoint.x, rect2->maxPoint.x);
 	float y6 = fminf(rect1->maxPoint.y, rect2->maxPoint.y);
-
+	//If one of these is exactly a zero area, then we have a complete overlap
 	return fmaxf(0.0, x6 - x5)*fmaxf(0.0, y6 - y5); //This assume that my difference is positive, which it should be for it to be overlapping
 }
 //We are assigning, which is highly parallizable. So we shouldn't need the overhead of the function call
 //Creates the surface area complement rectangle to figure out how much we are off the room
 __inline__ __device__ void createComplementRectangle(BoundingBox* srfRect, BoundingBox* rectangles) {
 	// 0 is min value, 1 is max value
-	rectangles[0].minPoint.x = -DBL_MAX;
-	rectangles[0].minPoint.y = -DBL_MAX;
-	rectangles[0].maxPoint.x = DBL_MAX;
+	rectangles[0].minPoint.x = -FLT_MAX;
+	rectangles[0].minPoint.y = -FLT_MAX;
+	rectangles[0].maxPoint.x = FLT_MAX;
 	rectangles[0].maxPoint.y = srfRect->minPoint.y;
 
-	rectangles[1].minPoint.x = -DBL_MAX;
+	rectangles[1].minPoint.x = -FLT_MAX;
 	rectangles[1].minPoint.y = srfRect->minPoint.y;
 	rectangles[1].maxPoint.x = srfRect->minPoint.x;
 	rectangles[1].maxPoint.y = srfRect->maxPoint.y;
 
-	rectangles[2].minPoint.x = -DBL_MAX;
+	rectangles[2].minPoint.x = -FLT_MAX;
 	rectangles[2].minPoint.y = srfRect->maxPoint.y;
-	rectangles[2].maxPoint.x = DBL_MAX;
-	rectangles[2].maxPoint.y = DBL_MAX;
+	rectangles[2].maxPoint.x = FLT_MAX;
+	rectangles[2].maxPoint.y = FLT_MAX;
 
 	rectangles[3].minPoint.x = srfRect->maxPoint.x;
 	rectangles[3].minPoint.y = srfRect->minPoint.y;
-	rectangles[3].maxPoint.x = DBL_MAX;
+	rectangles[3].maxPoint.x = FLT_MAX;
 	rectangles[3].maxPoint.y = srfRect->maxPoint.y;
 }
 
@@ -530,8 +510,7 @@ __device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 {
 	int tid = group.thread_rank();
 	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	float values= 0.0f;
 	for (int i = tid; i < srf->nClearances; i+=step) {
 		BoundingBox rect1; //The starting bounding box
 		calculateBoundingBox(cfg, clearances[i].SourceIndex, &rect1);
@@ -546,7 +525,7 @@ __device__ float ClearanceCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 		}
 	}
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -558,8 +537,7 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 
 	int tid = group.thread_rank();
 	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	float values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	// Describe the complement of surfaceRectangle as four rectangles (using their min and max values)
 	BoundingBox rect;
 	BoundingBox complementRectangle[4];
@@ -591,15 +569,16 @@ __device__ float SurfaceAreaCosts(cg::thread_block_tile<tile_sz> group, Surface 
 		// rectangle #1
 		//offlimits is the size of cfg
 		calculateBoundingBox(cfg, i, &rect1);
-
-		// printf("Clearance rectangle %d: Min X: %f Y: %f Max X: %f Y: %f\n", i, rect1Min.x, rect1Min.y, rect1Max.x, rect1Max.y);
+		float area = 0.0f;
 		for (int j = 0; j < 4; j++) {
-			values += calculateIntersectionArea(&rect1, &complementRectangle[j]);
+			area += calculateIntersectionArea(&rect1, &complementRectangle[j]);
 		}
+		values += area;
+		//printf("Clearance rectangle %d:(%f,%f),(%f,%f), error is %f\n", i, rect1.minPoint.x, rect1.minPoint.y, rect1.maxPoint.x, rect1.maxPoint.y,area);
 	}
 
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -608,8 +587,7 @@ template<int tile_sz>
 __device__ float OffLimitsCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, positionAndRotation *cfg, vertex *vertices, rectangle *offlimits) {
 	int tid = group.thread_rank();
 	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
+	float values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 	for (int i = tid; i < srf->nObjs; i += step) {
 		BoundingBox rect1;
 		calculateBoundingBox(cfg, i, &rect1);
@@ -617,11 +595,14 @@ __device__ float OffLimitsCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 			BoundingBox rect2;
 			calculateBoundingBox(cfg, j, &rect2);
 			float area = calculateIntersectionArea(&rect1, &rect2);
+			//printf("Area for (%f,%f,%f,%f) and (%f,%f,%f,%f) is %f\n",
+			//	rect1.minPoint.x, rect1.minPoint.y, rect1.maxPoint.x, rect1.maxPoint.y,
+			//	rect2.minPoint.x, rect2.minPoint.y, rect2.maxPoint.x, rect2.maxPoint.y, area);
 			values += area;
 		}
 	}
 	group.sync();
-	reduce<tile_sz>(group, values);
+	values = reduce<tile_sz>(group, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
@@ -631,8 +612,8 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 {
 	int gid = group.thread_rank();
 	//float pairWiseCosts = 0;
-	float pairWiseCosts =  PairWiseTotalCosts<tile_sz>(group, srf, cfg, rs);
-	pairWiseCosts *= srf->WeightPairWise;
+	float pairWiseCosts =  srf->WeightPairWise * PairWiseTotalCosts<tile_sz>(group, srf, cfg, rs);
+	//pairWiseCosts *= srf->WeightPairWise;
 	// printf("Pair wise costs with weight %f\n", pairWiseCosts);
 	//float visualBalanceCosts = 0;
 	float visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts<tile_sz>(group, srf, cfg);
@@ -651,6 +632,7 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 	//float surfaceAreaCosts = 0;
 	float surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
+	//float alignmentCosts = 0;
 	float alignmentCosts = srf->WeightAlignment * AlignmentCosts<tile_sz>(group, srf, cfg);
 	float totalCosts = pairWiseCosts + visualBalanceCosts + focalPointCosts + symmertryCosts + clearanceCosts + offlimitsCosts  + surfaceAreaCosts + alignmentCosts;
 
@@ -698,12 +680,12 @@ __inline__ __device__ int generateRandomIntInRange(curandState *rngStates, unsig
 	return (int)truncf(p_rand);
 }
 
-__inline__ __device__ float generateRandomFloatInRange(curandState *rngStates, unsigned int tid, int max, int min)
+__inline__ __device__ float generateRandomFloatInRange(curandState *rngStates, unsigned int tid, float max, float min)
 {
 	curandState localState = rngStates[tid];
 	float p_rand = curand_uniform(&localState);
 	rngStates[tid] = localState;
-	p_rand *= (max - min + 0.999999);
+	p_rand *= (max - min);
 	p_rand += min;
 	return p_rand; //The only difference between float and int is that we do not trucate the float in this one
 }
@@ -747,8 +729,9 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 		obj = group.shfl(obj, leader);
 
 
-		//printf("Selected object #: %d\n", obj);
+		
 		if (gid == 0) {
+			//printf("Selected object #: %d\n", obj);
 			float dx = curand_normal(&rngStates[tid]);
 			cfg[obj].x += dx * stdXAxis;
 			//printf("dx: %f\n", dx);
@@ -852,14 +835,14 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, posi
 	}
 }
 
-__device__ bool Accept(double costStar, double costCur, curandState *rngStates, unsigned int tid,float beta)
+__device__ bool Accept(float costStar, float costCur, curandState *rngStates, unsigned int tid, float beta)
 {
 	//printf("Costs of Star, Cur, and beta difference: %f, %f, %f\n", costStar,costCur,(costStar - costCur));
 	//printf("(float) exp(-BETA * (costStar - costCur)): %f\n", (float)expf(beta * (costCur - costStar)));
 	float randomNumber = curand_uniform(&rngStates[tid]);
 	//printf("Random number: %f\n", randomNumber);
-	//In reality, it should be -beta, because that is the boltsmann dist. However, that has the effect of favoring star configurations that are 
-	//higher cost than the current. We are trying to minimize, so beta should be positive. This way, we only accept higher costs on low betas
+	//In reality, it should be -beta, because that is the boltsmann dist. However, writing it exactly like that  means that we favor higher star costs (as a negitive difference means e^x > 1)
+	//instead of lower star costs. We also want the effect of it being harder to be greater than one when beta is lower
 	return  randomNumber < fminf(1.0f, expf(-beta * (costStar - costCur)));
 }
 
@@ -883,6 +866,23 @@ __device__ void Copy(cg::thread_block_tile<tile_sz> group, positionAndRotation* 
 	group.sync();
 }
 
+//Lowers the temperature (beta) randomly between a set value
+//In general temperature prediction is extremely difficult, and so
+//this function should be changed accordingly to meet those needs
+template<int tile_sz>
+__device__ float generateBeta(cg::thread_block_tile<tile_sz> group, curandState *rngStates, float old_beta) {
+	//Merrell et al. uses replica exchange to exchange temperature constants between warps.
+	//Here, we use Simulated tempering to move the range states down from their starting state, starting on a random hot state and 
+	//moving to a random cooler state.
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
+	float beta = generateRandomFloatInRange(rngStates, tid, old_beta, old_beta /2); //We get a beta value between hot (accept if it is better or cold). 
+	//if (group.thread_rank() == 0) {
+	//	printf("Beta is %f from %f\n", beta, old_beta);
+	//}
+	beta = group.shfl(beta, 0);//shf calls shfl_sync, which as a broadcast should sync
+	return beta;
+}
+
 template<int tile_sz>
 __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 	positionAndRotation* cfgBest,
@@ -901,14 +901,14 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 							// Copy best config (now set to input config) to result of this block
 
 	bool accept;
-	float beta = generateRandomFloatInRange(rngStates, tid, 2, 0.001); //We get a beta value between hot (accept if it is better or 
-	beta = group.shfl(beta, 0);//shf calls shfl_sync, which as a broadcast should sync
+
+	float beta = generateBeta(group,rngStates,generateRandomFloatInRange(rngStates, tid, 20, 10)); //This is a high value, and should give us a good starting range
 	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
 
 	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
 	CopyCosts(bestCosts, starCosts);
 	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-
+	int modifier = iterations / 10;
 	for (int i = 0; i < iterations; i++)
 	{
 		
@@ -918,7 +918,7 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 		if (gtid == 0) {
 			accept = Accept(starCosts->totalCosts, bestCosts->totalCosts, rngStates, tid,beta);
 			//if(accept)
-			//	printf("Star accepted, cost goes from %f -> %f\n", bestCosts->totalCosts, starCosts->totalCosts);
+			//	printf("Star accepted, cost goes from %f -> %f with beta %f\n", bestCosts->totalCosts, starCosts->totalCosts,beta);
 
 		}
 		accept = group.shfl(accept, 0);
@@ -935,8 +935,9 @@ __device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
 			Copy<tile_sz>(group, cfgStar, cfgBest, srf);
 			//CopyCosts(bestCosts, starCosts); //We re-run the costs, so no need to copy it
 		}
-
-		// Check whether we continue with current or we continue with star
+		if((i+1)% modifier == 0) //get about 10 cooling downs
+			beta = generateBeta(group, rngStates, beta);//Every so often, we possibly cool the system
+			// Check whether we continue with current or we continue with star
 	}
 
 	group.sync();
@@ -1034,7 +1035,7 @@ __global__ void Kernel(resultCosts* resultCostsArray,
    //create the working groups
 	int rank = threadIdx.x / WARP_SIZE;
 	positionAndRotation* best_conf = &configurations[rank * srf->nObjs];
-	positionAndRotation* star_conf = &configurations[srf->nObjs * blockDim.x / WARP_SIZE + rank];
+	positionAndRotation* star_conf = &configurations[srf->nObjs * (jumper + rank)];
 	resultCosts* best_cost = &costs[rank];
 	resultCosts* star_cost = &costs[jumper + rank];
 	auto tile_warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block()); //Broken up by our warp size, which is our static shared memory size!
@@ -1044,8 +1045,8 @@ __global__ void Kernel(resultCosts* resultCostsArray,
 	groupKernel<WARP_SIZE>(tile_warp,best_conf,best_cost,star_conf,star_cost, rs, clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
 	__syncthreads();
 	int lowest_cost = lowestIndex(best_cost, jumper);
-	copyToGlobalMemory(p, srf, resultCostsArray, best_conf, costs, lowest_cost);
-	__syncthreads();
+	copyToGlobalMemory(p, srf, resultCostsArray, configurations, costs, lowest_cost);
+	//__syncthreads();
 
 }
 
@@ -1185,7 +1186,7 @@ int main(int argc, char **argv)
 
 	const int N = 10;
 	const int NRel = 1;
-	const int NClearances = 30;
+	const int NClearances = 3*N;
 	Surface srf;
 	srf.nObjs = N;
 	srf.nRelationships = NRel;
@@ -1198,8 +1199,8 @@ int main(int argc, char **argv)
 	srf.WeightSurfaceArea = 1.0f;
 	srf.WeightOffLimits = 1.0f;
 	srf.WeightAlignment = 1.0f;
-	srf.centroidX = 0.0;
-	srf.centroidY = 0.0;
+	srf.centroidX = 5.0;
+	srf.centroidY = 5.0;
 	srf.focalX = 5.0;
 	srf.focalY = 5.0;
 	srf.focalRot = 0.0;
@@ -1216,21 +1217,21 @@ int main(int argc, char **argv)
 	gpuCfg.iterations = 1000;//a 10th of what they claimed in the paper
 
 	vertex surfaceRectangle[4];
-	surfaceRectangle[0].x = 10;
-	surfaceRectangle[0].y = 10;
-	surfaceRectangle[0].z = 0;
+	surfaceRectangle[0].x =  10;
+	surfaceRectangle[0].y =  10;
+	surfaceRectangle[0].z =   0;
 
-	surfaceRectangle[1].x = 10;
-	surfaceRectangle[1].y = 0;
-	surfaceRectangle[1].z = 0;
+	surfaceRectangle[1].x =  10;
+	surfaceRectangle[1].y =   0;
+	surfaceRectangle[1].z =   0;
 
-	surfaceRectangle[2].x = 0;
-	surfaceRectangle[2].y = 0;
-	surfaceRectangle[2].z = 0;
+	surfaceRectangle[2].x =	  0;
+	surfaceRectangle[2].y =   0;
+	surfaceRectangle[2].z =   0;
 
-	surfaceRectangle[3].x = 0;
-	surfaceRectangle[3].y = 10;
-	surfaceRectangle[3].z = 0;
+	surfaceRectangle[3].x =   0;
+	surfaceRectangle[3].y =	 10;
+	surfaceRectangle[3].z =   0;
 
 	const int vertices = (N + NClearances) * 4;
 	vertex vtx[vertices];
@@ -1355,7 +1356,7 @@ int main(int argc, char **argv)
 	rss[0].TargetRange.targetRangeEnd = 4.0;
 	rss[0].AngleRange.targetRangeStart = 0.01*PI;
 	rss[0].AngleRange.targetRangeEnd = PI;
-	rss[0].DegreesOfAtrraction = 2.0;
+	rss[0].DegreesOfAtrraction = 2;
 	rss[0].SourceIndex = 0;
 	rss[0].TargetIndex = 1;
 
@@ -1378,23 +1379,22 @@ int main(int argc, char **argv)
 	//}
 
 	// Point test code:
-
 	result *result = KernelWrapper(rss, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, &gpuCfg);
 	printf("Results:\n");
 	for (int i = 0; i < gpuCfg.gridxDim; i++)
 	{
 		printf("Result %d\n", i);
 		for (int j = 0; j < srf.nObjs; j++) {
-			printf("Point [%d] X,Y,Z: %f, %f, %f	Rotation: %f, %f, %f\n", 
+			printf("Point [%d] X,Y,Z: %f, %f, %f	Rotation: %f, %f, %f\n",
 				j,
-				result[i].points[j].x, 
-				result[i].points[j].y, 
-				result[i].points[j].z, 
-				result[i].points[j].rotX, 
+				result[i].points[j].x,
+				result[i].points[j].y,
+				result[i].points[j].z,
+				result[i].points[j].rotX,
 				result[i].points[j].rotY,
 				result[i].points[j].rotZ);
 		}
-		printf("Costs are %f+%f+%f+%f+%f+%f+%f+%f=%f\n", 
+		printf("Costs are %f+%f+%f+%f+%f+%f+%f+%f=%f\n",
 			result[i].costs.FocalPointCosts,
 			result[i].costs.PairWiseCosts,
 			result[i].costs.SymmetryCosts,
@@ -1404,7 +1404,7 @@ int main(int argc, char **argv)
 			result[i].costs.SurfaceAreaCosts,
 			result[i].costs.AlignmentCosts,
 			result[i].costs.totalCosts);
-	}
+		}
 	system("PAUSE");
  	return EXIT_SUCCESS;
 }
