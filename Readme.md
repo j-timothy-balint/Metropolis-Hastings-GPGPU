@@ -1,5 +1,5 @@
 # Readme for GPGPU algorithm
-This GPGPU algorithm written in CUDA was used as a part of a WPF C# application that was implemented to be used in the user study of the thesis "Narrative world creation with assisted environment filling" by Marijn Goedegebure. The thesis itself can be found here: https://repository.tudelft.nl/islandora/object/uuid%3A819b3f0e-bcac-4501-86aa-f23199fee8e1?collection=education. The C# application can be found here:
+This GPGPU algorithm written in CUDA was used as a part of a WPF C# application that was implemented to be used in the user study of the thesis "Narrative world creation with assisted environment filling" by Marijn Goedegebure. The thesis itself can be found here: https://repository.tudelft.nl/islandora/object/uuid%3A819b3f0e-bcac-4501-86aa-f23199fee8e1?collection=education. The C# application can be found here: https://bitbucket.org/marijngoedegebure/narrativeworldcreator/src
 
 This GPGPU algorithm was implemented based on the research "Interactive Furniture Layout Using Interior Design Guidelines" and implementation by Paul Merrel et al.
 
