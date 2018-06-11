@@ -3,7 +3,9 @@ This GPGPU algorithm written in CUDA was used as a part of a WPF C# application 
 
 This GPGPU algorithm was implemented based on the research "Interactive Furniture Layout Using Interior Design Guidelines" and implementation by Paul Merrel et al.
 
-This repository has three branches. The test-version branch was used for the user study version of the C# application and works with that master branch. The Parallel_Met-Hastings and master branch include more optimizations as the test-version suffered from some performance issues for larger sets of objects.
+This repository has three branches. The test-version branch was used for the user study version of the C# application and works with that master branch. The Parallel_Met-Hastings and master branch include more optimizations as the test-version suffered from some performance issues for larger sets of objects. The optimizations were implemented by T. Balint during his time as a Post Doc during his time at the TU Delft.
+
+If you have any questions regarding the implementation you can contact me at marijngoedegebure @ gmail.com.
 
 This GPGPU algorithm and the C# application are both available to the public under the MIT licence, see below.
 
