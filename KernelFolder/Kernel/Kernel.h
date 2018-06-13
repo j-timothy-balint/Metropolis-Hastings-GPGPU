@@ -12,9 +12,11 @@ struct BoundingBox //added because several huristics use a min and max point, so
 	vertex maxPoint;
 };
 
-struct group
+//We sort group in place, and then can make assumptions about the objects in the group
+struct Group
 {
-	int *groupItemIndices;
+	int SourceIndex;
+	int TargetIndex;
 };
 
 struct rectangle
@@ -40,21 +42,31 @@ struct relationshipStruct
 };
 
 //We have 5 degrees of freedom. max we will combine is 3 (x,y,z) 
-struct guassianRelationshipStruct
+struct gaussianRelationshipStruct
 {
 	int SourceIndex;
 	int TargetIndex;
 	float mean[3];
 	float deviation[3];
 };
+//We've defined a few pairwise choices, guassian vs euclidean and single vs total. 
+//These control the values sent into our cost function for pairwise
+struct PairWiseChoices 
+{
+	bool total;
+	bool gaussian;
+};
 
 struct Surface
 {
 	int nObjs; //Total number of objects we are solidifying
 	int nRelationships;//Total number of relationships between objects
-	int nAngleRelationships;
+	int nAngleRelationships; //Total number of relationships for angles
 	int nClearances;//Total number of clearances between objects
 	int nGroups;//Total number of groups
+
+	//Our choice commands
+	PairWiseChoices pwChoices[2];
 
 	// Weights
 	float WeightFocalPoint;
@@ -117,9 +129,6 @@ struct result {
 
 
 
-extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg);
-extern "C" __declspec(dllexport) result* KernelGaussianWrapper(guassianRelationshipStruct *rss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg);
-extern "C" __declspec(dllexport) result* KernelGaussianWrapperAngle(guassianRelationshipStruct *rss, guassianRelationshipStruct *gas, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg);
-extern "C" __declspec(dllexport) result* KernelWrapperGaussianAngle(relationshipStruct *rss, guassianRelationshipStruct *gas, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg);
+extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, gaussianRelationshipStruct* gss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, Group* groups, gpuConfig *gpuCfg);
 
 __declspec(dllexport) void basicCudaDeviceInformation(int argc, char **argv);

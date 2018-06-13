@@ -57,7 +57,7 @@ __inline__ __device__ float phi(float xi, float yi, float xj, float yj, float tj
 	return atan2f(yi - yj, xi - xj) - tj + PI / 2.0;
 }
 
-__inline__ __device__ float guassian(float val, float mean, float deviation) {
+__inline__ __device__ float gaussian(float val, float mean, float deviation) {
 	//We don't worry about where the deviation puts it. What we want is a gaussian with an aplitude of -1 at the mean
 	float x = (val - mean) / deviation;
 	return expf(-0.5f *x*x);// / (deviation *GAUSS_PI);
@@ -103,14 +103,12 @@ __device__ float VisualBalanceCosts(cg::thread_block_tile<tile_sz> group, Surfac
 }
 
 template<int tile_sz>
-__device__ float AlignmentCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg) {
+__device__ float AlignmentCosts(cg::thread_block_tile<tile_sz> group, Group* groups, Surface *srf, point* cfg) {
 	int tid = group.thread_rank();
 	int step = group.size();
 	float costs = 0.0;
-	for (int i = tid; i < srf->nObjs; i += step) { //Eventually, this will transform into groups
-		for (int j = 0; j < srf->nObjs; j += step) {
-			costs += cosf(4 * cfg[i].freedom[4] - cfg[j].freedom[4]);
-		}
+	for (int i = tid; i < srf->nGroups; i += step) { //Eventually, this will transform into groups
+			costs += cosf(4 * cfg[groups[i].SourceIndex].freedom[4] - cfg[groups[i].TargetIndex].freedom[4]);
 	}
 	group.sync();
 	costs = reduce<tile_sz>(group, costs);
@@ -119,22 +117,37 @@ __device__ float AlignmentCosts(cg::thread_block_tile<tile_sz> group, Surface *s
 
 //Euclidean distance is useful for 
 template<int tile_sz>
-__device__ float PairWiseEuclidean(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, relationshipStruct *rs)
+__device__ float PairWiseEuclidean(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, relationshipStruct *rs, int freedom, int source_index)
 {
 	int tid = group.thread_rank();
 	int step = group.size();
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nRelationships; i += step)
-	{
-		// Look up source index from relationship and retrieve object using that index.
-		float distance = Distance(cfg[rs[i].SourceIndex].freedom[0], cfg[rs[i].SourceIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[0], cfg[rs[i].TargetIndex].freedom[1]);
-		//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
-		//penalize if we are too close
-		//Score distance calculation
-		float score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
-		score = (distance > rs[i].TargetRange.targetRangeEnd) ? powf(rs[i].TargetRange.targetRangeEnd / distance, rs[i].DegreesOfAtrraction) : score;
-		values -= score;
+	if (srf->pwChoices[0].total) {
+		for (int i= tid; i < srf->nRelationships; i += step)
+		{
+			// Look up source index from relationship and retrieve object using that index.
+			float distance = Distance(cfg[rs[i].SourceIndex].freedom[0], cfg[rs[i].SourceIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[0], cfg[rs[i].TargetIndex].freedom[1]);
+			//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
+			//penalize if we are too close
+			//Score distance calculation
+			float score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
+			score = (distance > rs[i].TargetRange.targetRangeEnd) ? powf(rs[i].TargetRange.targetRangeEnd / distance, rs[i].DegreesOfAtrraction) : score;
+			values -= score;
+		}
+	}
+	else {
+		for (int i = tid; i < srf->nRelationships; i += step)
+		{
+			// Look up source index from relationship and retrieve object using that index.
+			float distance = fabs(cfg[rs[i].SourceIndex].freedom[freedom]-cfg[rs[i].TargetIndex].freedom[freedom]);//Distance(cfg[rs[i].SourceIndex].freedom[0], cfg[rs[i].SourceIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[0], cfg[rs[i].TargetIndex].freedom[1]);
+			//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
+			//penalize if we are too close
+			//Score distance calculation
+			float score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
+			score = (distance > rs[i].TargetRange.targetRangeEnd) ? powf(rs[i].TargetRange.targetRangeEnd / distance, rs[i].DegreesOfAtrraction) : score;
+			values -= score;
+		}
 	}
 	group.sync();
 	values = reduce<tile_sz>(group, values);
@@ -145,13 +158,22 @@ __device__ float PairWiseEuclidean(cg::thread_block_tile<tile_sz> group, Surface
 //This functional principle uses a lookup (relationshipStruct) to determine weights from a recommended angle
 //This is not the facing angle but the distance angle (so, the target rotated around the source)
 template<int tile_sz>
-__device__ float PairWiseAngle(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, relationshipStruct *rs)
+__device__ float PairWiseAngle(cg::thread_block_tile<tile_sz> tb, Surface *srf, point* cfg, relationshipStruct *rs)
 {
-	int tid = group.thread_rank();
-	int step = group.size();
+	int tid = tb.thread_rank();
+	int step = tb.size();
+
+	int i = tid; //Change when at nAngle
+	int end = srf->nAngleRelationships;
+	//Determines our bound on the array
+	if (!srf->pwChoices[0].gaussian) {
+		i += srf->nRelationships;
+		end += srf->nRelationships;
+	}
+
 	float values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
 						 //assuming (0,2*PI]
-	for (int i = tid; i < srf->nRelationships; i += step)
+	for (i; i < end; i += step)
 	{
 		// We use phi to calculate the angle between the rotation of the object and the target object
 		float angle = theta(cfg[rs[i].SourceIndex].freedom[0], cfg[rs[i].SourceIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[0], cfg[rs[i].TargetIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[4]);
@@ -161,100 +183,54 @@ __device__ float PairWiseAngle(cg::thread_block_tile<tile_sz> group, Surface *sr
 		values -= (rs[i].TargetRange.targetRangeEnd < angle || angle < rs[i].TargetRange.targetRangeEnd) ? fminf(fabsf(angle - rs[i].TargetRange.targetRangeStart),
 			fabsf(angle - rs[i].TargetRange.targetRangeEnd)) / norm : 1.0;
 	}
-	group.sync();
-	values = reduce<tile_sz>(group, values);
+	tb.sync();
+	values = reduce<tile_sz>(tb, values);
 	//printf("Clearance costs error: %f\n", error);
 	return values;
 }
 
-
-//Single Dim allows us to determine orthogonal relationships (if we have a box or cube that the target object must exist in, we can run this on each dimension to
-//make sure that we fit in there)
 template<int tile_sz>
-__device__ float PairWiseSingleDim(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, relationshipStruct *rs, int dim) {
+__device__ float PairWiseGaussian(cg::thread_block_tile<tile_sz> group, Surface* srf, point* cfg, gaussianRelationshipStruct *rs, int freedom,int source_index,int pwc) {
 	int tid = group.thread_rank();
 	int step = group.size();
 	float values;
 	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nRelationships; i += step)
-	{
-		//This should be fine, the tile size will all be running the same dim
-		float distance = fabsf(cfg[rs[i].SourceIndex].freedom[dim] - cfg[rs[i].TargetIndex].freedom[dim]);
-		//printf("Distance: %f Range start: %f Range end: %f\n", distance, rs[i].TargetRange.targetRangeStart, rs[i].TargetRange.targetRangeEnd);
-		//penalize if we are too close
-		//Score distance calculation
-		float score = (distance < rs[i].TargetRange.targetRangeStart) ? powf(distance / rs[i].TargetRange.targetRangeStart, rs[i].DegreesOfAtrraction) : 1.0;
-		score = (distance > rs[i].TargetRange.targetRangeEnd) ? powf(rs[i].TargetRange.targetRangeEnd / distance, rs[i].DegreesOfAtrraction) : score;
-		values -= score;
+	int i = tid; //Change when at nAngle
+	int end = srf->nAngleRelationships;
+	//Determines our bound on the array
+	if (pwc == 0) {
+		end = srf->nRelationships;
 	}
-	group.sync();
-	values = reduce<tile_sz>(group, values);
-	//printf("Clearance costs error: %f\n", error);
-	return values;
-}
-//Guassian computes three 1D gaussians in the x and y direction (as gaussians are seperable) and multiplies them together
-//We are assuming spherical guassians for this, which may turn out to be a bad assumption
-template<int tile_sz>
-__device__ float PairWiseGuassian(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, guassianRelationshipStruct *rs) {
-	int tid = group.thread_rank();
-	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nRelationships; i += step)
-	{
-		float score = 1.0; //Will want to change this later
-		for (int j = 0; j < 2; j++) {
-			// Look up source index from relationship and retrieve object using that index.
-			float dist = fabsf(cfg[rs[i].SourceIndex].freedom[j] - cfg[rs[i].TargetIndex].freedom[j]); //squared root of squared is bascially abs for 1-D shapes, this is much faster
-			score *= guassian(dist, rs[i].mean[j], rs[i].deviation[j]);
+	else if (pwc == 1 && srf->pwChoices[0].gaussian) {
+		i += srf->nRelationships; 
+		end += srf->nRelationships;
+	}
+	
+	if (srf->pwChoices[i].total) {
+		for (i; i < end; i += step) {
+			float score = 1.0;
+			for (int j = 0; j < 3; j++) {
+				float dist = fabsf(cfg[rs[i].SourceIndex].freedom[j] - cfg[rs[i].TargetIndex].freedom[j]); //squared root of squared is bascially abs for 1-D shapes, this is much faster
+				score *= gaussian(dist, rs[i].mean[j], rs[i].deviation[j]);
+			}
+			values -= score;
 		}
-		values -= score;
 	}
-	group.sync();
-	values = reduce<tile_sz>(group, values);
-	//printf("Clearance costs error: %f\n", error);
-	return values;
-}
-
-template<int tile_sz>
-__device__ float PairWiseGaussian1D(cg::thread_block_tile<tile_sz> group, Surface* srf, point* cfg, guassianRelationshipStruct *rs, int freedom) {
-	int tid = group.thread_rank();
-	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-
-	for (int i = tid; i < srf->nAngleRelationships; i += step)
-	{
-		// Look up source index from relationship and retrieve object using that index.
-		float dist = fabsf(cfg[rs[i].SourceIndex].freedom[freedom] - cfg[rs[i].TargetIndex].freedom[freedom]); //squared root of squared is bascially abs for 1-D shapes, this is much faster
-		float score = guassian(dist, rs[i].mean[0], rs[i].deviation[0]);
-		//printf("Score is %d %f & %f with %f= %f & %f\n", i, cfg[rs[i].SourceIndex].freedom[freedom], cfg[rs[i].TargetIndex].freedom[freedom], rs[i].deviation[0], dist, score);
-		values -= score;
+	else {
+		for (i; i < end; i += step)
+		{
+			// Look up source index from relationship and retrieve object using that index.
+			float dist = fabsf(cfg[rs[i].SourceIndex].freedom[freedom] - cfg[rs[i].TargetIndex].freedom[freedom]); //squared root of squared is bascially abs for 1-D shapes, this is much faster
+			float score = gaussian(dist, rs[i].mean[source_index], rs[i].deviation[source_index]);
+			values -= score;
+		}
 	}
 	group.sync();
 	values = reduce<tile_sz>(group, values);
 	return values;
 }
 
-//We will just re-use the gaussian2D relationship structure
-template<int tile_sz>
-__device__ float PairWiseGuassianAngle(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, guassianRelationshipStruct* rs) {
-	int tid = group.thread_rank();
-	int step = group.size();
-	float values;
-	values = 0.0f; //Since it's size blockDim, we can have each of them treat it as the starting value
-	for (int i = tid; i < srf->nAngleRelationships; i += step)
-	{
-		// Look up source index from relationship and retrieve object using that index.
-		float angle = theta(cfg[rs[i].SourceIndex].freedom[0], cfg[rs[i].SourceIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[0], cfg[rs[i].TargetIndex].freedom[1], cfg[rs[i].TargetIndex].freedom[4]);
-		values -= guassian(angle, rs[i].mean[0], rs[i].deviation[0]);
-		//printf("costs %f = (a = %f, m = %f, s = %f)\n", values,angle,rs[i].meanX, rs[i].deviationX);
-	}
-	group.sync();
-	values = reduce<tile_sz>(group, values);
 
-	return values;
-}
 template<int tile_sz>
 __device__ float FocalPointCosts(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg)
 {

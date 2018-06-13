@@ -79,34 +79,34 @@ __inline__ __device__ float generateRandomFloatInRange(curandState *rngStates, u
 //or globally only for Merrell's algorithm
 //Our if statements run per tile_sz (warp), so there shouldn't be no-op problems
 template<int tile_sz>
-__device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, resultCosts* costs, point* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle) {
-	int gid = group.thread_rank();
+__device__ void Costs(cg::thread_block_tile<tile_sz> tb, Surface *srf, Group* groups, resultCosts* costs, point* cfg, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle) {
+	int gid = tb.thread_rank();
 	float visualBalanceCosts = 0;
 	if (srf->WeightVisualBalance > 0.0f)
-		visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts<tile_sz>(group, srf, cfg);
+		visualBalanceCosts = srf->WeightVisualBalance * VisualBalanceCosts<tile_sz>(tb, srf, cfg);
 	// printf("Visual balance costs with weight %f\n", visualBalanceCosts);
 	float focalPointCosts = 0;
 	if (srf->WeightFocalPoint > 0.0f)
-		focalPointCosts = srf->WeightFocalPoint * FocalPointCosts<tile_sz>(group, srf, cfg);
+		focalPointCosts = srf->WeightFocalPoint * FocalPointCosts<tile_sz>(tb, srf, cfg);
 	// printf("Focal point costs with weight %f\n", focalPointCosts);
 	float symmertryCosts = 0;
 	if (srf->WeightSymmetry > 0.0f)
-		symmertryCosts = srf->WeightSymmetry * SymmetryCosts<tile_sz>(group, srf, cfg);
+		symmertryCosts = srf->WeightSymmetry * SymmetryCosts<tile_sz>(tb, srf, cfg);
 	// printf("Symmertry costs with weight %f\n", symmertryCosts);
 	float offlimitsCosts = 0;
 	if (srf->WeightOffLimits > 0.0f)
-		offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts<tile_sz>(group, srf, cfg, vertices, offlimits);
+		offlimitsCosts = srf->WeightOffLimits * OffLimitsCosts<tile_sz>(tb, srf, cfg, vertices, offlimits);
 	//printf("OffLimits costs with weight %f\n", offlimitsCosts);
 	float clearanceCosts = 0;
 	if (srf->WeightClearance > 0.0f)
-		clearanceCosts = srf->WeightClearance * ClearanceCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits);
+		clearanceCosts = srf->WeightClearance * ClearanceCosts<tile_sz>(tb, srf, cfg, vertices, clearances, offlimits);
 	float surfaceAreaCosts = 0;
 	if (srf->WeightSurfaceArea > 0.0f)
-		surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(group, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
+		surfaceAreaCosts = srf->WeightSurfaceArea * SurfaceAreaCosts<tile_sz>(tb, srf, cfg, vertices, clearances, offlimits, surfaceRectangle);
 	//printf("Surface area costs with weight %f\n", surfaceAreaCosts);
 	float alignmentCosts = 0;
 	if (srf->WeightAlignment > 0.0f)
-		alignmentCosts = srf->WeightAlignment * AlignmentCosts<tile_sz>(group, srf, cfg);
+		alignmentCosts = srf->WeightAlignment * AlignmentCosts<tile_sz>(tb, groups, srf, cfg);
 
 
 	if (gid == 0) {
@@ -118,99 +118,43 @@ __device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, result
 		costs->SurfaceAreaCosts = surfaceAreaCosts;
 		costs->AlignmentCosts = alignmentCosts;
 	}
-	group.sync();
+	tb.sync();
 }
 //This contains the euclidean pairwise cost that was originally in Merell et al.
 template<int tile_sz>
-__device__ void Costs(cg::thread_block_tile<tile_sz> group, Surface *srf, resultCosts* costs, point* cfg, relationshipStruct *rs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
+__device__ void Costs(cg::thread_block_tile<tile_sz> tb, Surface *srf, Group* groups, resultCosts* costs, point* cfg, relationshipStruct *rs, gaussianRelationshipStruct* gs, vertex *vertices, rectangle *clearances, rectangle *offlimits, vertex *surfaceRectangle)
 {
-	int gid = group.thread_rank();
+	int gid = tb.thread_rank();
 	float pairWiseCosts = 0;
 	if (srf->WeightPairWise > 0.0f) {
-		pairWiseCosts = srf->WeightPairWise * PairWiseEuclidean<tile_sz>(group, srf, cfg, rs);
+		if (!srf->pwChoices[0].gaussian) {
+			pairWiseCosts += srf->WeightPairWise * PairWiseEuclidean<tile_sz>(tb, srf, cfg, rs,-1,-1);
+		}
+		else {
+			pairWiseCosts += srf->WeightPairWise * PairWiseGaussian<tile_sz>(tb, srf, cfg, gs, -1, -1, 0);
+		}
+		if (!srf->pwChoices[1].gaussian) {
+			pairWiseCosts += srf->WeightPairWise * PairWiseAngle<tile_sz>(tb, srf, cfg, rs);
+		}
+		else {
+			pairWiseCosts += srf->WeightPairWise * PairWiseGaussian<tile_sz>(tb, srf, cfg, gs, 4,0,1);
+		}
 	}
-	Costs<tile_sz>(group, srf, costs,  cfg, vertices, clearances,offlimits, surfaceRectangle);
+	Costs<tile_sz>(tb, srf, groups, costs,  cfg, vertices, clearances,offlimits, surfaceRectangle);
 	if (gid == 0) {
 		costs->PairWiseCosts = pairWiseCosts;
 		costs->totalCosts = pairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->OffLimitsCosts + costs->SurfaceAreaCosts + costs->AlignmentCosts;
 	}
-	group.sync();
-}
-//Gaussian that is in Fisher et al.
-template<int tile_sz>
-__device__ void Costs(cg::thread_block_tile<tile_sz> group, 
-							  Surface *srf, resultCosts* costs, point* cfg, 
-							  guassianRelationshipStruct* rs, vertex *vertices, rectangle *clearances, 
-							  rectangle *offlimits, vertex *surfaceRectangle)
-{
-	int gid = group.thread_rank();
-	float pairWiseCosts = 0;
-	if (srf->WeightPairWise > 0.0f) {
-		pairWiseCosts = srf->WeightPairWise * PairWiseGuassian<tile_sz>(group, srf, cfg, rs);
-	}
-	Costs<tile_sz>(group, srf, costs, cfg, vertices, clearances, offlimits, surfaceRectangle);
-	if (gid == 0) {
-		costs->PairWiseCosts = pairWiseCosts;
-		costs->totalCosts = pairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->OffLimitsCosts + costs->SurfaceAreaCosts + costs->AlignmentCosts;
-
-	}
-	group.sync();
-}
-//Gaussian that is in Fisher et al. with angle tolerances
-template<int tile_sz>
-__device__ void Costs(cg::thread_block_tile<tile_sz> group,
-	Surface *srf, resultCosts* costs, point* cfg,
-	guassianRelationshipStruct* rs, guassianRelationshipStruct* ra, vertex *vertices, rectangle *clearances,
-	rectangle *offlimits, vertex *surfaceRectangle)
-{
-	int gid = group.thread_rank();
-	float pairWiseCosts = 0;
-	if (srf->WeightPairWise > 0.0f) {
-		pairWiseCosts = srf->WeightPairWise * (PairWiseGuassian<tile_sz>(group, srf, cfg, rs)+ PairWiseGuassianAngle(group,srf,cfg,ra));
-	}
-	Costs<tile_sz>(group, srf, costs, cfg, vertices, clearances, offlimits, surfaceRectangle);
-	if (gid == 0) {
-		costs->PairWiseCosts = pairWiseCosts;
-		costs->totalCosts = pairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->OffLimitsCosts + costs->SurfaceAreaCosts + costs->AlignmentCosts;
-	}
-	group.sync();
-}
-//Gaussian that is in Fisher et al. with angle tolerances
-template<int tile_sz>
-__device__ void Costs(cg::thread_block_tile<tile_sz> group,
-	Surface *srf, resultCosts* costs, point* cfg,
-	relationshipStruct* rs, guassianRelationshipStruct* ra, vertex *vertices, rectangle *clearances,
-	rectangle *offlimits, vertex *surfaceRectangle)
-{
-	int gid = group.thread_rank();
-	float pairWiseCosts = 0;
-	if (srf->WeightPairWise > 0.0f) {
-		pairWiseCosts = srf->WeightPairWise * (PairWiseEuclidean<tile_sz>(group, srf, cfg, rs) + PairWiseGaussian1D(group, srf, cfg, ra,4));
-	}
-	Costs<tile_sz>(group, srf, costs, cfg, vertices, clearances, offlimits, surfaceRectangle);
-	if (gid == 0) {
-		costs->PairWiseCosts = pairWiseCosts;
-		costs->totalCosts = costs->PairWiseCosts + costs->VisualBalanceCosts + costs->FocalPointCosts + costs->SymmetryCosts + costs->ClearanceCosts + costs->OffLimitsCosts + costs->SurfaceAreaCosts + costs->AlignmentCosts;
-		/*printf("(p=%f,v=%f,f=%f,s=%f,c=%f,o=%f,sa=%f,a=%f) = %f\n", costs->PairWiseCosts,
-			costs->VisualBalanceCosts,
-			costs->FocalPointCosts,
-			costs->SymmetryCosts,
-			costs->ClearanceCosts,
-			costs->OffLimitsCosts,
-			costs->SurfaceAreaCosts,
-			costs->AlignmentCosts,
-			costs->totalCosts);*/
-	}
-	group.sync();
+	tb.sync();
 }
 //End of cost functions
 /**************************************************************************************************************************************************************************************************************************/
 
 
 template<int tile_sz>
-__device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, point* cfg, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
+__device__ void propose(cg::thread_block_tile<tile_sz> tb, Surface *srf, point* cfg, vertex * surfaceRectangle, curandState *rngStates, unsigned int tid)
 {
-	int gid = group.thread_rank();
+	int gid = tb.thread_rank();
 	/*for (int j = 0; j < srf->nObjs; j++)
 	{
 		printf("Star values inside proposition jndex %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", j, cfgStar[j].x, cfgStar[j].y, cfgStar[j].z, cfgStar[j].rotX, cfgStar[j].freedom[4], cfgStar[j].rotZ);
@@ -218,8 +162,8 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, poin
 	int p = generateRandomIntInRange(rngStates, tid, 2, 0);
 
 	//Get everyone on the same page
-	p = group.shfl(p, 0); //broadcast out to p
-	//group.sync(); shlf_sync is broadcast and so should sync
+	p = tb.shfl(p, 0); //broadcast out to p
+	
 	// Determine width and length of surface rectangle
 	BoundingBox srfRect;
 	calculateBoundingBox(surfaceRectangle, 0, 0, &srfRect);
@@ -236,12 +180,12 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, poin
 		//bool found = false;
 		int obj = -1;
 		obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!group.any(!cfg[obj].frozen)) {
+		if (!tb.any(!cfg[obj].frozen)) {
 			return;
 		}
-		int mask = group.ballot(!cfg[obj].frozen);
+		int mask = tb.ballot(!cfg[obj].frozen);
 		int leader = __ffs(mask);
-		obj = group.shfl(obj, leader);
+		obj = tb.shfl(obj, leader);
 		//Everybody choses a direction and change. The first one we don't have to clamp is the winner
 		int direction = generateRandomIntInRange(rngStates, tid, 2, 0);
 		if (gid == 0) {
@@ -253,8 +197,8 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, poin
 			cfg[obj].freedom[1] += dy * stdYAxis;
 			// printf("Before translation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].freedom[0], cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].freedom[4], cfgStar[obj].rotZ);
 			//Clamp should be taken care of by surface area
-			//cfg[obj].freedom[0] = clamp(cfg[obj].freedom[0], srfRect.minPoint.x, srfRect.maxPoint.x); //xClamps
-			//cfg[obj].freedom[1] = clamp(cfg[obj].freedom[1], srfRect.minPoint.y, srfRect.maxPoint.y); //yClamps
+			cfg[obj].freedom[0] = clamp(cfg[obj].freedom[0], srfRect.minPoint.x, srfRect.maxPoint.x); //xClamps
+			cfg[obj].freedom[1] = clamp(cfg[obj].freedom[1], srfRect.minPoint.y, srfRect.maxPoint.y); //yClamps
 		}
 		// printf("After rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].freedom[4], cfgStar[obj].rotZ);
 	}
@@ -265,12 +209,12 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, poin
 		// Take 100 tries to find a random nonfrozen object
 		//for (int i = 0; i < 100 && !found; i++) {
 		obj = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!group.any(!cfg[obj].frozen)) {
+		if (!tb.any(!cfg[obj].frozen)) {
 			return;
 		}
-		int mask = group.ballot(!cfg[obj].frozen);
+		int mask = tb.ballot(!cfg[obj].frozen);
 		int leader = __ffs(mask);
-		obj = group.shfl(obj, leader);
+		obj = tb.shfl(obj, leader);
 		if (gid == 0) {
 			// printf("Selected object #: %d\n", obj);
 			// printf("Before rotation, obj %d. X, Y, Z: %f, %f, %f rotation: %f, %f, %f\n", obj, cfgStar[obj].x, cfgStar[obj].y, cfgStar[obj].z, cfgStar[obj].rotX, cfgStar[obj].freedom[4], cfgStar[obj].rotZ);
@@ -291,20 +235,20 @@ __device__ void propose(cg::thread_block_tile<tile_sz> group, Surface *srf, poin
 		int obj1 = -1;
 		int obj2 = -1;
 		obj1 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!group.any(!cfg[obj1].frozen)) {
+		if (!tb.any(!cfg[obj1].frozen)) {
 			return;
 		}
-		int mask = group.ballot(!cfg[obj1].frozen);
+		int mask = tb.ballot(!cfg[obj1].frozen);
 		int leader = __ffs(mask);
-		obj1 = group.shfl(obj1, leader);
+		obj1 = tb.shfl(obj1, leader);
 
 		obj2 = generateRandomIntInRange(rngStates, tid, srf->nObjs - 1, 0);
-		if (!group.any(!cfg[obj2].frozen)) {
+		if (!tb.any(!cfg[obj2].frozen)) {
 			return;
 		}
-		mask = group.ballot(!cfg[obj2].frozen && obj2 != obj1);
+		mask = tb.ballot(!cfg[obj2].frozen && obj2 != obj1);
 		leader = __ffs(mask);
-		obj2 = group.shfl(obj2, leader);
+		obj2 = tb.shfl(obj2, leader);
 
 		/*if (obj1 == obj2) {
 			return; //No point at this step
@@ -335,10 +279,10 @@ __device__ bool Accept(float costStar, float costCur, curandState *rngStates, un
 }
 
 template<int tile_sz>
-__device__ void Copy(cg::thread_block_tile<tile_sz> group, point* cfg1, point* cfg2, Surface* srf)
+__device__ void Copy(cg::thread_block_tile<tile_sz> tb, point* cfg1, point* cfg2, Surface* srf)
 {
-	int tid = group.thread_rank();
-	int step = group.size();
+	int tid = tb.thread_rank();
+	int step = tb.size();
 	for (unsigned int i = tid; i < srf->nObjs; i += step)
 	{
 		cfg1[i].freedom[0] = cfg2[i].freedom[0];
@@ -351,28 +295,28 @@ __device__ void Copy(cg::thread_block_tile<tile_sz> group, point* cfg1, point* c
 		cfg1[i].width = cfg2[i].width;
 		cfg1[i].height = cfg2[i].height;
 	}
-	group.sync();
+	tb.sync();
 }
 
 //Lowers the temperature (beta) randomly between a set value
 //In general temperature prediction is extremely difficult, and so
 //this function should be changed accordingly to meet those needs
 template<int tile_sz>
-__device__ float generateBeta(cg::thread_block_tile<tile_sz> group, curandState *rngStates, float old_beta) {
+__device__ float generateBeta(cg::thread_block_tile<tile_sz> tb, curandState *rngStates, float old_beta) {
 	//Merrell et al. uses replica exchange to exchange temperature constants between warps.
 	//Here, we use Simulated tempering to move the range states down from their starting state, starting on a random hot state and 
 	//moving to a random cooler state.
 	int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	float beta = generateRandomFloatInRange(rngStates, tid, old_beta, old_beta /2); //We get a beta value between hot (accept if it is better or cold). 
-	//if (group.thread_rank() == 0) {
+	//if (tb.thread_rank() == 0) {
 	//	printf("Beta is %f from %f\n", beta, old_beta);
 	//}
-	beta = group.shfl(beta, 0);//shf calls shfl_sync, which as a broadcast should sync
+	beta = tb.shfl(beta, 0);//shf calls shfl_sync, which as a broadcast should sync
 	return beta;
 }
 
 template<int tile_sz>
-__device__ void acceptKernel(cg::thread_block_tile<tile_sz> group,
+__device__ void acceptKernel(cg::thread_block_tile<tile_sz> tb,
 	point* cfgBest,
 	resultCosts* bestCosts,
 	point* cfgStar,
@@ -380,7 +324,7 @@ __device__ void acceptKernel(cg::thread_block_tile<tile_sz> group,
 	resultCosts* starCosts,
 	curandState *rngStates,
 	float beta) {
-	int gtid = group.thread_rank();//The thread id in the working group
+	int gtid = tb.thread_rank();//The thread id in the working group
 	int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	bool accept;
 	if (gtid == 0) {
@@ -388,164 +332,64 @@ __device__ void acceptKernel(cg::thread_block_tile<tile_sz> group,
 		//if(accept)
 		//	printf("Star accepted, cost goes from %f -> %f with beta %f\n", bestCosts->totalCosts, starCosts->totalCosts,beta);
 	}
-	accept = group.shfl(accept, 0);
+	accept = tb.shfl(accept, 0);
 	if (accept)
 	{
 		// Possible different approach: Set pointer of current to star, free up memory used by current? reinitialize star?
 		//printf("Star accepted as new current.\n");
 		// Copy star into current
-		Copy<tile_sz>(group, cfgBest, cfgStar, srf);
+		Copy<tile_sz>(tb, cfgBest, cfgStar, srf);
 		CopyCosts(starCosts, bestCosts);
 	}
 	else { //Reject it
-		Copy<tile_sz>(group, cfgStar, cfgBest, srf);
+		Copy<tile_sz>(tb, cfgStar, cfgBest, srf);
 		//CopyCosts(bestCosts, starCosts); //We re-run the costs, so no need to copy it
 	}
 }
 /*****************************************************************************************************************************************************************************/
 //Our group kernal for euclidean distance
 template<int tile_sz>
-__device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
+__device__ void groupKernel(cg::thread_block_tile<tile_sz> tb,
 	point* cfgBest,
 	resultCosts* bestCosts,
 	point* cfgStar,
 	resultCosts* starCosts,
 	relationshipStruct *rs,
+	gaussianRelationshipStruct* gs,
 	rectangle *clearances, rectangle *offlimits,
 	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
+	Group* groups,
 	int iterations, curandState *rngStates)
 {
 	int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	
-	int step = group.size();//The working group block size
-	float beta = generateBeta(group,rngStates,generateRandomFloatInRange(rngStates, tid, 20, 10)); //This is a high value, and should give us a good starting range
-	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
-	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
+	int step = tb.size();//The working group block size
+	float beta = generateBeta(tb,rngStates,generateRandomFloatInRange(rngStates, tid, 20, 10)); //This is a high value, and should give us a good starting range
+	Copy<tile_sz>(tb, cfgStar, cfgBest, srf);
+	Costs<tile_sz>(tb, srf, groups,bestCosts, cfgBest, rs, gs, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
 	CopyCosts(bestCosts, starCosts);
 	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
 	int modifier = iterations / 10;
 	for (int i = 0; i < iterations; i++)
 	{
 		
-		propose<tile_sz>(group, srf, cfgStar, surfaceRectangle, rngStates, tid);
-		group.sync();
-		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
-		acceptKernel<tile_sz>(group, cfgBest, bestCosts, cfgStar, srf, starCosts, rngStates,beta);
+		propose<tile_sz>(tb, srf, cfgStar, surfaceRectangle, rngStates, tid);
+		tb.sync();
+		Costs<tile_sz>(tb, srf, groups, starCosts, cfgStar, rs, gs, vertices, clearances, offlimits, surfaceRectangle);
+		acceptKernel<tile_sz>(tb, cfgBest, bestCosts, cfgStar, srf, starCosts, rngStates,beta);
 		if((i+1)% modifier == 0) //get about 10 cooling downs
-			beta = generateBeta(group, rngStates, beta);//Every so often, we possibly cool the system
+			beta = generateBeta(tb, rngStates, beta);//Every so often, we possibly cool the system
 	}
-	group.sync();
-}
-//Our group kernel for guassian2D distance
-template<int tile_sz>
-__device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
-	point* cfgBest,
-	resultCosts* bestCosts,
-	point* cfgStar,
-	resultCosts* starCosts,
-	guassianRelationshipStruct* rs,
-	rectangle *clearances, rectangle *offlimits,
-	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
-	int iterations, curandState *rngStates)
-{
-	int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-	int step = group.size();//The working group block size
-	float beta = generateBeta(group, rngStates, generateRandomFloatInRange(rngStates, tid, 20, 10)); //This is a high value, and should give us a good starting range
-	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
-	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
-	CopyCosts(bestCosts, starCosts);
-	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	int modifier = iterations / 10;
-	for (int i = 0; i < iterations; i++)
-	{
-
-		propose<tile_sz>(group, srf, cfgStar, surfaceRectangle, rngStates, tid);
-		group.sync();
-		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, vertices, clearances, offlimits, surfaceRectangle);
-		acceptKernel<tile_sz>(group, cfgBest, bestCosts, cfgStar, srf, starCosts, rngStates, beta);
-		if ((i + 1) % modifier == 0) //get about 10 cooling downs
-			beta = generateBeta(group, rngStates, beta);//Every so often, we possibly cool the system
-	}
-	group.sync();
-}
-//Our group kernel for guassian2D distance with angle
-template<int tile_sz>
-__device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
-	point* cfgBest,
-	resultCosts* bestCosts,
-	point* cfgStar,
-	resultCosts* starCosts,
-	guassianRelationshipStruct* rs,
-	guassianRelationshipStruct* ra,
-	rectangle *clearances, rectangle *offlimits,
-	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
-	int iterations, curandState *rngStates)
-{
-	int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-	int step = group.size();//The working group block size
-	float beta = generateBeta(group, rngStates, generateRandomFloatInRange(rngStates, tid, 20, 10)); //This is a high value, and should give us a good starting range
-	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
-	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs,ra, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
-	CopyCosts(bestCosts, starCosts);
-	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	int modifier = iterations / 10;
-	for (int i = 0; i < iterations; i++)
-	{
-
-		propose<tile_sz>(group, srf, cfgStar, surfaceRectangle, rngStates, tid);
-		group.sync();
-		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, ra, vertices, clearances, offlimits, surfaceRectangle);
-		acceptKernel<tile_sz>(group, cfgBest, bestCosts, cfgStar, srf, starCosts, rngStates, beta);
-		if ((i + 1) % modifier == 0) //get about 10 cooling downs
-			beta = generateBeta(group, rngStates, beta);//Every so often, we possibly cool the system
-	}
-	group.sync();
-}
-
-//Our group kernel for  distance with guassian angle
-template<int tile_sz>
-__device__ void groupKernel(cg::thread_block_tile<tile_sz> group,
-	point* cfgBest,
-	resultCosts* bestCosts,
-	point* cfgStar,
-	resultCosts* starCosts,
-	relationshipStruct* rs,
-	guassianRelationshipStruct* ra,
-	rectangle *clearances, rectangle *offlimits,
-	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
-	int iterations, curandState *rngStates)
-{
-	int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-	int step = group.size();//The working group block size
-	float beta = generateBeta(group, rngStates, generateRandomFloatInRange(rngStates, tid, 20, 10)); //This is a high value, and should give us a good starting range
-	Copy<tile_sz>(group, cfgStar, cfgBest, srf);
-	Costs<tile_sz>(group, srf, bestCosts, cfgBest, rs, ra, vertices, clearances, offlimits, surfaceRectangle); //possible race condition here
-	CopyCosts(bestCosts, starCosts);
-	//printf("Threadblock: %d, Best costs before: %f\n", blockIdx.x, bestCosts->totalCosts);
-	int modifier = iterations / 10;
-	for (int i = 0; i < iterations; i++)
-	{
-
-		propose<tile_sz>(group, srf, cfgStar, surfaceRectangle, rngStates, tid);
-		group.sync();
-		Costs<tile_sz>(group, srf, starCosts, cfgStar, rs, ra, vertices, clearances, offlimits, surfaceRectangle);
-		acceptKernel<tile_sz>(group, cfgBest, bestCosts, cfgStar, srf, starCosts, rngStates, beta);
-		if ((i + 1) % modifier == 0) //get about 10 cooling downs
-			beta = generateBeta(group, rngStates, beta);//Every so often, we possibly cool the system
-	}
-	group.sync();
+	tb.sync();
 }
 /**************************************************************************************************************************************************************************/
 //Helper function to copy the information from global memory into a shared array
 template<int tile_sz>
-__device__ void copyToSharedMemory(cg::thread_block_tile<tile_sz> group,
+__device__ void copyToSharedMemory(cg::thread_block_tile<tile_sz> tb,
 	point *p,
 	Surface *srf,
 	point* configuration) {
-	int gid = group.thread_rank();
+	int gid = tb.thread_rank();
 	for (unsigned int i = gid; i < srf->nObjs; i += WARP_SIZE)
 	{
 		// BlockId counts from 0, so to properly multiply
@@ -620,9 +464,10 @@ __device__ int lowestIndex(resultCosts* best_costs, int active_warps) {
 //This isn't really worth it to break up 
 // Surface is a basic struct
 __global__ void Kernel(resultCosts* resultCostsArray,
-	point *p, relationshipStruct *rs,
+	point *p, relationshipStruct *rs, gaussianRelationshipStruct* gs,
 	rectangle *clearances, rectangle *offlimits,
 	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
+	Group* groups,
 	gpuConfig *gpuCfg, curandState *rngStates) {
 
 	extern __shared__ int all_shared_memory[];
@@ -637,102 +482,24 @@ __global__ void Kernel(resultCosts* resultCostsArray,
 	resultCosts* best_cost = &costs[rank];
 	resultCosts* star_cost = &costs[jumper + rank];
 	auto tile_warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block()); //Broken up by our warp size, which is our static shared memory size!
-
+	if(threadIdx.x == 0)
+		printf("Set up partition fine\n");
 	//This is the actual work done
 	copyToSharedMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
-	groupKernel<WARP_SIZE>(tile_warp,best_conf,best_cost,star_conf,star_cost, rs, clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
+	groupKernel<WARP_SIZE>(tile_warp,best_conf,best_cost,star_conf,star_cost, rs, gs, clearances, offlimits, vertices, surfaceRectangle, srf, groups, gpuCfg->iterations, rngStates);
 	__syncthreads();
 	int lowest_cost = lowestIndex(best_cost, jumper);
 	copyToGlobalMemory(p, srf, resultCostsArray, configurations, costs, lowest_cost);
 	//__syncthreads();
 }
-//Gaussian Kernel
-__global__ void Kernel(resultCosts* resultCostsArray,
-	point *p, guassianRelationshipStruct* rs,
-	rectangle *clearances, rectangle *offlimits,
-	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
-	gpuConfig *gpuCfg, curandState *rngStates) {
-
-	extern __shared__ int all_shared_memory[];
-	int jumper = blockDim.x / WARP_SIZE;
-	point* configurations = (point*)&all_shared_memory;
-	resultCosts* costs = (resultCosts*)&configurations[2 * jumper * srf->nObjs];
-	__syncthreads();
-	//create the working groups
-	int rank = threadIdx.x / WARP_SIZE;
-	point* best_conf = &configurations[rank * srf->nObjs];
-	point* star_conf = &configurations[srf->nObjs * (jumper + rank)];
-	resultCosts* best_cost = &costs[rank];
-	resultCosts* star_cost = &costs[jumper + rank];
-	auto tile_warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block()); //Broken up by our warp size, which is our static shared memory size!
-
-																			  //This is the actual work done
-	copyToSharedMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
-	groupKernel<WARP_SIZE>(tile_warp, best_conf, best_cost, star_conf, star_cost, rs, clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
-	__syncthreads();
-	int lowest_cost = lowestIndex(best_cost, jumper);
-	copyToGlobalMemory(p, srf, resultCostsArray, configurations, costs, lowest_cost);
-	//__syncthreads();
-}
-//Gaussian Kernal with Angle
-//Gaussian Kernel
-__global__ void Kernel(resultCosts* resultCostsArray,
-	point *p, guassianRelationshipStruct* rs,
-	guassianRelationshipStruct* ra,
-	rectangle *clearances, rectangle *offlimits,
-	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
-	gpuConfig *gpuCfg, curandState *rngStates) {
-
-	extern __shared__ int all_shared_memory[];
-	int jumper = blockDim.x / WARP_SIZE;
-	point* configurations = (point*)&all_shared_memory;
-	resultCosts* costs = (resultCosts*)&configurations[2 * jumper * srf->nObjs];
-	__syncthreads();
-	//create the working groups
-	int rank = threadIdx.x / WARP_SIZE;
-	point* best_conf = &configurations[rank * srf->nObjs];
-	point* star_conf = &configurations[srf->nObjs * (jumper + rank)];
-	resultCosts* best_cost = &costs[rank];
-	resultCosts* star_cost = &costs[jumper + rank];
-	auto tile_warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block()); //Broken up by our warp size, which is our static shared memory size!
-	copyToSharedMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
-	groupKernel<WARP_SIZE>(tile_warp, best_conf, best_cost, star_conf, star_cost, rs,ra,clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
-	__syncthreads();
-	int lowest_cost = lowestIndex(best_cost, jumper);
-	copyToGlobalMemory(p, srf, resultCostsArray, configurations, costs, lowest_cost);
-	//__syncthreads();
-}
-
-__global__ void Kernel(resultCosts* resultCostsArray,
-	point *p, relationshipStruct* rs,
-	guassianRelationshipStruct* ra,
-	rectangle *clearances, rectangle *offlimits,
-	vertex *vertices, vertex *surfaceRectangle, Surface *srf,
-	gpuConfig *gpuCfg, curandState *rngStates) {
-
-	extern __shared__ int all_shared_memory[];
-	int jumper = blockDim.x / WARP_SIZE;
-	point* configurations = (point*)&all_shared_memory;
-	resultCosts* costs = (resultCosts*)&configurations[2 * jumper * srf->nObjs];
-	__syncthreads();
-	//create the working groups
-	int rank = threadIdx.x / WARP_SIZE;
-	point* best_conf = &configurations[rank * srf->nObjs];
-	point* star_conf = &configurations[srf->nObjs * (jumper + rank)];
-	resultCosts* best_cost = &costs[rank];
-	resultCosts* star_cost = &costs[jumper + rank];
-	auto tile_warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block()); //Broken up by our warp size, which is our static shared memory size!
-	copyToSharedMemory<WARP_SIZE>(tile_warp, p, srf, best_conf);
-	groupKernel<WARP_SIZE>(tile_warp, best_conf, best_cost, star_conf, star_cost, rs, ra, clearances, offlimits, vertices, surfaceRectangle, srf, gpuCfg->iterations, rngStates);
-	__syncthreads();
-	int lowest_cost = lowestIndex(best_cost, jumper);
-	copyToGlobalMemory(p, srf, resultCostsArray, configurations, costs, lowest_cost);
-	//__syncthreads();
-}
-//End Kernel functions
 /***********************************************************************************************************************************************************************************/
 //This is the kernal wrapper for everything. Sadly, it may not be worth it to break it up like some of our other functions
-extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
+extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss,
+													   gaussianRelationshipStruct *gss,
+													   point *previouscfgs, 
+													   rectangle *clearances,rectangle *offlimits, 
+													   vertex *vertices, vertex *surfaceRectangle,
+													   Surface *srf, Group* groups, gpuConfig *gpuCfg)
 {
 	// Create pointer for on gpu
 	// Determine memory size of object to transfer
@@ -765,15 +532,45 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	checkCudaErrors(cudaMalloc(&gpuSRF, srfSize));
 	checkCudaErrors(cudaMemcpy(gpuSRF, srf, srfSize, cudaMemcpyHostToDevice));
 
+	Group *gpuGroups;
+	int groupsSize = sizeof(Group) * srf->nGroups;
+	checkCudaErrors(cudaMalloc(&gpuGroups, groupsSize));
+	checkCudaErrors(cudaMemcpy(gpuGroups, groups, groupsSize, cudaMemcpyHostToDevice));
+
 	gpuConfig *gpuGpuConfig;
 	int gpuCFGSize = sizeof(gpuConfig);
 	checkCudaErrors(cudaMalloc(&gpuGpuConfig, gpuCFGSize));
 	checkCudaErrors(cudaMemcpy(gpuGpuConfig, gpuCfg, gpuCFGSize, cudaMemcpyHostToDevice));
 
 	relationshipStruct *gpuRS;
-	int rsSize = sizeof(relationshipStruct) * srf->nRelationships;
+	int rsSize = sizeof(relationshipStruct);
+	if (!srf->pwChoices[0].gaussian && !srf->pwChoices[1].gaussian) { //Both are relationships structures
+		rsSize *= (srf->nRelationships + srf->nAngleRelationships);
+	}else if (!srf->pwChoices[0].gaussian && srf->pwChoices[1].gaussian) {
+		rsSize *= srf->nRelationships;
+	}
+	else if (srf->pwChoices[0].gaussian && !srf->pwChoices[1].gaussian) {
+		rsSize *= srf->nAngleRelationships;
+	}
+	else { rsSize *= 0; } //Ain't got nothing for it
 	checkCudaErrors(cudaMalloc(&gpuRS, rsSize));
 	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
+
+	gaussianRelationshipStruct *gpuGS;
+	int gsSize = sizeof(gaussianRelationshipStruct);
+	if (srf->pwChoices[0].gaussian && srf->pwChoices[1].gaussian) { //Both are relationships structures
+		gsSize *= (srf->nRelationships + srf->nAngleRelationships);
+	}
+	else if (srf->pwChoices[0].gaussian && !srf->pwChoices[1].gaussian) {
+		gsSize *= srf->nRelationships;
+	}
+	else if (!srf->pwChoices[0].gaussian && srf->pwChoices[1].gaussian) {
+		gsSize *= srf->nAngleRelationships;
+	}
+	else { gsSize *= 0; } //Ain't got nothing for it
+	//Same thing with the gaussians
+	checkCudaErrors(cudaMalloc(&gpuGS, gsSize));
+	checkCudaErrors(cudaMemcpy(gpuGS, gss, gsSize, cudaMemcpyHostToDevice));
 
 	// Output
 	point *gpuPointArray;
@@ -805,303 +602,7 @@ extern "C" __declspec(dllexport) result* KernelWrapper(relationshipStruct *rss, 
 	// Grid 1 dimension, amount of suggestions to be made.
 	//we make the dynamic memory 3 times because we have at least 3 arrays that use it in one function
 	int share_size = gpuCfg->blockxDim / WARP_SIZE * 2 * srf->nObjs * sizeof(point) + gpuCfg->blockxDim / WARP_SIZE * 2 * sizeof(resultCosts);
-	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim,share_size>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
-	checkCudaErrors(cudaDeviceSynchronize());
-	if (cudaSuccess != cudaGetLastError()) {
-		fprintf(stderr, "cudaSafeCall() failed : %s\n",
-			cudaGetErrorString(cudaGetLastError()));
-	}
-
-	// copy back results from gpu to cpu
-	checkCudaErrors(cudaMemcpy(outPointArray, gpuPointArray, pointArraySize, cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy(outResultCosts, gpuResultCosts, resultCostsSize, cudaMemcpyDeviceToHost));
-
-	// Free all allocated GPU memory
-	cudaFree(gpuRS);
-	cudaFree(gpuClearances);
-	cudaFree(gpuOfflimits);
-	cudaFree(gpuVertices);
-	cudaFree(gpuSurfaceRectangle);
-	cudaFree(gpuSRF);
-	cudaFree(gpuGpuConfig);
-	cudaFree(gpuPointArray);
-	cudaFree(gpuResultCosts);
-
-	// Construct return result
-	result *resultPointer = (result*)malloc(sizeof(result) * gpuCfg->gridxDim);
-	for (int i = 0; i < gpuCfg->gridxDim; i++)
-	{
-		resultPointer[i].costs.FocalPointCosts = outResultCosts[i].FocalPointCosts;
-		resultPointer[i].costs.PairWiseCosts = outResultCosts[i].PairWiseCosts;
-		resultPointer[i].costs.SymmetryCosts = outResultCosts[i].SymmetryCosts;
-		resultPointer[i].costs.totalCosts = outResultCosts[i].totalCosts;
-		resultPointer[i].costs.VisualBalanceCosts = outResultCosts[i].VisualBalanceCosts;
-		resultPointer[i].costs.ClearanceCosts = outResultCosts[i].ClearanceCosts;
-		resultPointer[i].costs.OffLimitsCosts = outResultCosts[i].OffLimitsCosts;
-		resultPointer[i].costs.SurfaceAreaCosts = outResultCosts[i].SurfaceAreaCosts;
-		resultPointer[i].costs.AlignmentCosts = outResultCosts[i].AlignmentCosts;
-		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
-	}
-	return resultPointer;
-}
-
-//This is the kernal wrapper for everything. Sadly, it may not be worth it to break it up like some of our other functions
-extern "C" __declspec(dllexport) result* KernelGaussianWrapper(guassianRelationshipStruct* rss, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
-{
-	// Create pointer for on gpu
-	// Determine memory size of object to transfer
-	// Malloc on GPU size
-	// Cpy memory from cpu to gpu
-
-	// Input
-	rectangle *gpuClearances;
-	int clearancesSize = sizeof(rectangle) * srf->nClearances;
-	checkCudaErrors(cudaMalloc(&gpuClearances, clearancesSize));
-	checkCudaErrors(cudaMemcpy(gpuClearances, clearances, clearancesSize, cudaMemcpyHostToDevice));
-
-	rectangle *gpuOfflimits;
-	int offlimitsSize = sizeof(rectangle) * srf->nObjs;
-	checkCudaErrors(cudaMalloc(&gpuOfflimits, offlimitsSize));
-	checkCudaErrors(cudaMemcpy(gpuOfflimits, offlimits, offlimitsSize, cudaMemcpyHostToDevice));
-
-	vertex *gpuVertices;
-	int verticesSize = sizeof(vertex) * (srf->nClearances * 4 + srf->nObjs * 4);
-	checkCudaErrors(cudaMalloc(&gpuVertices, verticesSize));
-	checkCudaErrors(cudaMemcpy(gpuVertices, vertices, verticesSize, cudaMemcpyHostToDevice));
-
-	vertex *gpuSurfaceRectangle;
-	int surfaceRectangleSize = sizeof(vertex) * 4;
-	checkCudaErrors(cudaMalloc(&gpuSurfaceRectangle, surfaceRectangleSize));
-	checkCudaErrors(cudaMemcpy(gpuSurfaceRectangle, surfaceRectangle, surfaceRectangleSize, cudaMemcpyHostToDevice));
-
-	Surface *gpuSRF;
-	int srfSize = sizeof(Surface);
-	checkCudaErrors(cudaMalloc(&gpuSRF, srfSize));
-	checkCudaErrors(cudaMemcpy(gpuSRF, srf, srfSize, cudaMemcpyHostToDevice));
-
-	gpuConfig *gpuGpuConfig;
-	int gpuCFGSize = sizeof(gpuConfig);
-	checkCudaErrors(cudaMalloc(&gpuGpuConfig, gpuCFGSize));
-	checkCudaErrors(cudaMemcpy(gpuGpuConfig, gpuCfg, gpuCFGSize, cudaMemcpyHostToDevice));
-
-	guassianRelationshipStruct* gpuRS;
-	int rsSize = sizeof(guassianRelationshipStruct) * srf->nRelationships;
-	checkCudaErrors(cudaMalloc(&gpuRS, rsSize));
-	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
-
-	// Output
-	point *gpuPointArray;
-	int pointArraySize = srf->nObjs * sizeof(point) * gpuCfg->gridxDim;
-	point *outPointArray = (point *)malloc(pointArraySize);
-	checkCudaErrors(cudaMalloc((void**)&gpuPointArray, pointArraySize));
-	checkCudaErrors(cudaMemcpy(gpuPointArray, previouscfgs, pointArraySize, cudaMemcpyHostToDevice));
-
-	resultCosts *gpuResultCosts;
-	int resultCostsSize = sizeof(resultCosts) * gpuCfg->gridxDim;
-	resultCosts *outResultCosts = (resultCosts *)malloc(resultCostsSize);
-	checkCudaErrors(cudaMalloc((void**)&gpuResultCosts, resultCostsSize));
-
-	// cudaMemcpy(gpuPointArray, result, pointArraySize, cudaMemcpyHostToDevice);
-	//Size of the shared array that holds the configuration data
-
-	// Setup GPU random generator
-	curandState *d_rngStates = 0;
-	checkCudaErrors(cudaMalloc((void **)&d_rngStates, gpuCfg->gridxDim * gpuCfg->blockxDim * sizeof(curandState)));
-
-	// Initialise random number generator
-	initRNG << <gpuCfg->gridxDim, gpuCfg->blockxDim >> > (d_rngStates, time(NULL));
-
-	// Commented for possible later usage
-	// dim3 dimGrid(gpuCfg->gridxDim, gpuCfg->gridyDim);
-	// dim3 dimBlock(gpuCfg->blockxDim, gpuCfg->blockyDim, gpuCfg->blockzDim);
-
-	// Block 1 dimensional, amount of threads available, configurable
-	// Grid 1 dimension, amount of suggestions to be made.
-	//we make the dynamic memory 3 times because we have at least 3 arrays that use it in one function
-	int share_size = gpuCfg->blockxDim / WARP_SIZE * 2 * srf->nObjs * sizeof(point) + gpuCfg->blockxDim / WARP_SIZE * 2 * sizeof(resultCosts);
-	Kernel << <gpuCfg->gridxDim, gpuCfg->blockxDim, share_size >> >(gpuResultCosts, gpuPointArray, gpuRS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
-	checkCudaErrors(cudaDeviceSynchronize());
-	if (cudaSuccess != cudaGetLastError()) {
-		fprintf(stderr, "cudaSafeCall() failed : %s\n",
-			cudaGetErrorString(cudaGetLastError()));
-	}
-
-	// copy back results from gpu to cpu
-	checkCudaErrors(cudaMemcpy(outPointArray, gpuPointArray, pointArraySize, cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy(outResultCosts, gpuResultCosts, resultCostsSize, cudaMemcpyDeviceToHost));
-
-	// Free all allocated GPU memory
-	cudaFree(gpuRS);
-	cudaFree(gpuClearances);
-	cudaFree(gpuOfflimits);
-	cudaFree(gpuVertices);
-	cudaFree(gpuSurfaceRectangle);
-	cudaFree(gpuSRF);
-	cudaFree(gpuGpuConfig);
-	cudaFree(gpuPointArray);
-	cudaFree(gpuResultCosts);
-
-	// Construct return result
-	result *resultPointer = (result*)malloc(sizeof(result) * gpuCfg->gridxDim);
-	for (int i = 0; i < gpuCfg->gridxDim; i++)
-	{
-		resultPointer[i].costs.FocalPointCosts = outResultCosts[i].FocalPointCosts;
-		resultPointer[i].costs.PairWiseCosts = outResultCosts[i].PairWiseCosts;
-		resultPointer[i].costs.SymmetryCosts = outResultCosts[i].SymmetryCosts;
-		resultPointer[i].costs.totalCosts = outResultCosts[i].totalCosts;
-		resultPointer[i].costs.VisualBalanceCosts = outResultCosts[i].VisualBalanceCosts;
-		resultPointer[i].costs.ClearanceCosts = outResultCosts[i].ClearanceCosts;
-		resultPointer[i].costs.OffLimitsCosts = outResultCosts[i].OffLimitsCosts;
-		resultPointer[i].costs.SurfaceAreaCosts = outResultCosts[i].SurfaceAreaCosts;
-		resultPointer[i].costs.AlignmentCosts = outResultCosts[i].AlignmentCosts;
-		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
-	}
-	return resultPointer;
-}
-
-//This is the kernal wrapper for everything. Sadly, it may not be worth it to break it up like some of our other functions
-extern "C" __declspec(dllexport) result* KernelGaussianWrapperAngle(guassianRelationshipStruct* rss, guassianRelationshipStruct* gas, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
-{
-
-	rectangle *gpuClearances;
-	int clearancesSize = sizeof(rectangle) * srf->nClearances;
-	checkCudaErrors(cudaMalloc(&gpuClearances, clearancesSize));
-	checkCudaErrors(cudaMemcpy(gpuClearances, clearances, clearancesSize, cudaMemcpyHostToDevice));
-	rectangle *gpuOfflimits;
-	int offlimitsSize = sizeof(rectangle) * srf->nObjs;
-	checkCudaErrors(cudaMalloc(&gpuOfflimits, offlimitsSize));
-	checkCudaErrors(cudaMemcpy(gpuOfflimits, offlimits, offlimitsSize, cudaMemcpyHostToDevice));
-	vertex *gpuVertices;
-	int verticesSize = sizeof(vertex) * (srf->nClearances * 4 + srf->nObjs * 4);
-	checkCudaErrors(cudaMalloc(&gpuVertices, verticesSize));
-	checkCudaErrors(cudaMemcpy(gpuVertices, vertices, verticesSize, cudaMemcpyHostToDevice));
-	vertex *gpuSurfaceRectangle;
-	int surfaceRectangleSize = sizeof(vertex) * 4;
-	checkCudaErrors(cudaMalloc(&gpuSurfaceRectangle, surfaceRectangleSize));
-	checkCudaErrors(cudaMemcpy(gpuSurfaceRectangle, surfaceRectangle, surfaceRectangleSize, cudaMemcpyHostToDevice));
-	Surface *gpuSRF;
-	int srfSize = sizeof(Surface);
-	checkCudaErrors(cudaMalloc(&gpuSRF, srfSize));
-	checkCudaErrors(cudaMemcpy(gpuSRF, srf, srfSize, cudaMemcpyHostToDevice));
-	gpuConfig *gpuGpuConfig;
-	int gpuCFGSize = sizeof(gpuConfig);
-	checkCudaErrors(cudaMalloc(&gpuGpuConfig, gpuCFGSize));
-	checkCudaErrors(cudaMemcpy(gpuGpuConfig, gpuCfg, gpuCFGSize, cudaMemcpyHostToDevice));
-	guassianRelationshipStruct* gpuRS;
-	int rsSize = sizeof(guassianRelationshipStruct) * srf->nRelationships;
-	checkCudaErrors(cudaMalloc(&gpuRS, rsSize));
-	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
-	guassianRelationshipStruct* gpuRA;
-	int raSize = sizeof(guassianRelationshipStruct) * srf->nAngleRelationships;
-	checkCudaErrors(cudaMalloc(&gpuRA, raSize));
-	checkCudaErrors(cudaMemcpy(gpuRA, gas, raSize, cudaMemcpyHostToDevice));
-	point *gpuPointArray;
-	int pointArraySize = srf->nObjs * sizeof(point) * gpuCfg->gridxDim;
-	point *outPointArray = (point*)malloc(pointArraySize);
-	checkCudaErrors(cudaMalloc((void**)&gpuPointArray, pointArraySize));
-	checkCudaErrors(cudaMemcpy(gpuPointArray, previouscfgs, pointArraySize, cudaMemcpyHostToDevice));
-	resultCosts *gpuResultCosts;
-	int resultCostsSize = sizeof(resultCosts) * gpuCfg->gridxDim;
-	resultCosts *outResultCosts = (resultCosts *)malloc(resultCostsSize);
-	checkCudaErrors(cudaMalloc((void**)&gpuResultCosts, resultCostsSize));
-	curandState *d_rngStates = 0;
-	checkCudaErrors(cudaMalloc((void **)&d_rngStates, gpuCfg->gridxDim * gpuCfg->blockxDim * sizeof(curandState)));
-
-	// Initialise random number generator
-	initRNG << <gpuCfg->gridxDim, gpuCfg->blockxDim >> > (d_rngStates, time(NULL));
-	int share_size = gpuCfg->blockxDim / WARP_SIZE * 2 * srf->nObjs * sizeof(point) + gpuCfg->blockxDim / WARP_SIZE * 2 * sizeof(resultCosts);
-	Kernel << <gpuCfg->gridxDim, gpuCfg->blockxDim, share_size >> >(gpuResultCosts, gpuPointArray, gpuRS, gpuRA, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
-	checkCudaErrors(cudaDeviceSynchronize());
-	if (cudaSuccess != cudaGetLastError()) {
-		fprintf(stderr, "cudaSafeCall() failed : %s\n",
-			cudaGetErrorString(cudaGetLastError()));
-	}
-
-	// copy back results from gpu to cpu
-	checkCudaErrors(cudaMemcpy(outPointArray, gpuPointArray, pointArraySize, cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy(outResultCosts, gpuResultCosts, resultCostsSize, cudaMemcpyDeviceToHost));
-
-	// Free all allocated GPU memory
-	cudaFree(gpuRS);
-	cudaFree(gpuClearances);
-	cudaFree(gpuOfflimits);
-	cudaFree(gpuVertices);
-	cudaFree(gpuSurfaceRectangle);
-	cudaFree(gpuSRF);
-	cudaFree(gpuGpuConfig);
-	cudaFree(gpuPointArray);
-	cudaFree(gpuResultCosts);
-
-	// Construct return result
-	result *resultPointer = (result*)malloc(sizeof(result) * gpuCfg->gridxDim);
-	for (int i = 0; i < gpuCfg->gridxDim; i++)
-	{
-		resultPointer[i].costs.FocalPointCosts = outResultCosts[i].FocalPointCosts;
-		resultPointer[i].costs.PairWiseCosts = outResultCosts[i].PairWiseCosts;
-		resultPointer[i].costs.SymmetryCosts = outResultCosts[i].SymmetryCosts;
-		resultPointer[i].costs.totalCosts = outResultCosts[i].totalCosts;
-		resultPointer[i].costs.VisualBalanceCosts = outResultCosts[i].VisualBalanceCosts;
-		resultPointer[i].costs.ClearanceCosts = outResultCosts[i].ClearanceCosts;
-		resultPointer[i].costs.OffLimitsCosts = outResultCosts[i].OffLimitsCosts;
-		resultPointer[i].costs.SurfaceAreaCosts = outResultCosts[i].SurfaceAreaCosts;
-		resultPointer[i].costs.AlignmentCosts = outResultCosts[i].AlignmentCosts;
-		resultPointer[i].points = &(outPointArray[i * srf->nObjs]);
-	}
-	return resultPointer;
-}
-
-//This is the kernal wrapper for everything. Sadly, it may not be worth it to break it up like some of our other functions
-extern "C" __declspec(dllexport) result* KernelWrapperGaussianAngle(relationshipStruct *rss, guassianRelationshipStruct *gas, point *previouscfgs, rectangle *clearances, rectangle *offlimits, vertex *vertices, vertex *surfaceRectangle, Surface *srf, gpuConfig *gpuCfg)
-{
-
-	rectangle *gpuClearances;
-	int clearancesSize = sizeof(rectangle) * srf->nClearances;
-	checkCudaErrors(cudaMalloc(&gpuClearances, clearancesSize));
-	checkCudaErrors(cudaMemcpy(gpuClearances, clearances, clearancesSize, cudaMemcpyHostToDevice));
-	rectangle *gpuOfflimits;
-	int offlimitsSize = sizeof(rectangle) * srf->nObjs;
-	checkCudaErrors(cudaMalloc(&gpuOfflimits, offlimitsSize));
-	checkCudaErrors(cudaMemcpy(gpuOfflimits, offlimits, offlimitsSize, cudaMemcpyHostToDevice));
-	vertex *gpuVertices;
-	int verticesSize = sizeof(vertex) * (srf->nClearances * 4 + srf->nObjs * 4);
-	checkCudaErrors(cudaMalloc(&gpuVertices, verticesSize));
-	checkCudaErrors(cudaMemcpy(gpuVertices, vertices, verticesSize, cudaMemcpyHostToDevice));
-	vertex *gpuSurfaceRectangle;
-	int surfaceRectangleSize = sizeof(vertex) * 4;
-	checkCudaErrors(cudaMalloc(&gpuSurfaceRectangle, surfaceRectangleSize));
-	checkCudaErrors(cudaMemcpy(gpuSurfaceRectangle, surfaceRectangle, surfaceRectangleSize, cudaMemcpyHostToDevice));
-	Surface *gpuSRF;
-	int srfSize = sizeof(Surface);
-	checkCudaErrors(cudaMalloc(&gpuSRF, srfSize));
-	checkCudaErrors(cudaMemcpy(gpuSRF, srf, srfSize, cudaMemcpyHostToDevice));
-	gpuConfig *gpuGpuConfig;
-	int gpuCFGSize = sizeof(gpuConfig);
-	checkCudaErrors(cudaMalloc(&gpuGpuConfig, gpuCFGSize));
-	checkCudaErrors(cudaMemcpy(gpuGpuConfig, gpuCfg, gpuCFGSize, cudaMemcpyHostToDevice));
-	relationshipStruct* gpuRS;
-	int rsSize = sizeof(relationshipStruct) * srf->nRelationships;
-	checkCudaErrors(cudaMalloc(&gpuRS, rsSize));
-	checkCudaErrors(cudaMemcpy(gpuRS, rss, rsSize, cudaMemcpyHostToDevice));
-	guassianRelationshipStruct* gpuRA;
-	int raSize = sizeof(guassianRelationshipStruct) * srf->nAngleRelationships;
-	checkCudaErrors(cudaMalloc(&gpuRA, raSize));
-	checkCudaErrors(cudaMemcpy(gpuRA, gas, raSize, cudaMemcpyHostToDevice));
-	point *gpuPointArray;
-	int pointArraySize = srf->nObjs * sizeof(point) * gpuCfg->gridxDim;
-	point *outPointArray = (point*)malloc(pointArraySize);
-	checkCudaErrors(cudaMalloc((void**)&gpuPointArray, pointArraySize));
-	checkCudaErrors(cudaMemcpy(gpuPointArray, previouscfgs, pointArraySize, cudaMemcpyHostToDevice));
-	resultCosts *gpuResultCosts;
-	int resultCostsSize = sizeof(resultCosts) * gpuCfg->gridxDim;
-	resultCosts *outResultCosts = (resultCosts *)malloc(resultCostsSize);
-	checkCudaErrors(cudaMalloc((void**)&gpuResultCosts, resultCostsSize));
-	curandState *d_rngStates = 0;
-	checkCudaErrors(cudaMalloc((void **)&d_rngStates, gpuCfg->gridxDim * gpuCfg->blockxDim * sizeof(curandState)));
-
-	// Initialise random number generator
-	initRNG << <gpuCfg->gridxDim, gpuCfg->blockxDim >> > (d_rngStates, time(NULL));
-	int share_size = gpuCfg->blockxDim / WARP_SIZE * 2 * srf->nObjs * sizeof(point) + gpuCfg->blockxDim / WARP_SIZE * 2 * sizeof(resultCosts);
-	Kernel << <gpuCfg->gridxDim, gpuCfg->blockxDim, share_size >> >(gpuResultCosts, gpuPointArray, gpuRS, gpuRA, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGpuConfig, d_rngStates);
+	Kernel <<<gpuCfg->gridxDim, gpuCfg->blockxDim,share_size>>>(gpuResultCosts, gpuPointArray, gpuRS, gpuGS, gpuClearances, gpuOfflimits, gpuVertices, gpuSurfaceRectangle, gpuSRF, gpuGroups, gpuGpuConfig, d_rngStates);
 	checkCudaErrors(cudaDeviceSynchronize());
 	if (cudaSuccess != cudaGetLastError()) {
 		fprintf(stderr, "cudaSafeCall() failed : %s\n",
@@ -1166,10 +667,17 @@ int main(int argc, char **argv)
 	const int N = 10;
 	const int NRel = 1;
 	const int NClearances = 3*N;
+	const int NGroups = N*(N-1) / 2;
+
 	Surface srf;
 	srf.nObjs = N;
+	srf.nGroups = NGroups;
 	srf.nRelationships = NRel;
 	srf.nAngleRelationships = 0;
+	srf.pwChoices[0].total = true;
+	srf.pwChoices[0].gaussian = false;
+	srf.pwChoices[1].total = true;
+	srf.pwChoices[1].gaussian = false;
 	srf.nClearances = NClearances;
 	srf.WeightFocalPoint = 1.0f;
 	srf.WeightPairWise = 1.0f;
@@ -1188,6 +696,17 @@ int main(int argc, char **argv)
 	const int dimensions = 4;
 
 	gpuConfig gpuCfg;
+
+	Group groups[NGroups];
+	//Pairwise everybody to everybody
+	int index = 0;
+	for (int i = 0; i < N; i++) {
+		for (int j = i + 1; j < N; j++) {
+			groups[index].SourceIndex = i;
+			groups[index].TargetIndex = j;
+			index++;
+		}
+	}
 
 	gpuCfg.gridxDim = dimensions;
 	gpuCfg.gridyDim = 0;
@@ -1331,24 +850,23 @@ int main(int argc, char **argv)
 	}
 
 	// Create relationship
-	//relationshipStruct rss[1];
-	//rss[0].TargetRange.targetRangeStart = 2.0;
-	//rss[0].TargetRange.targetRangeEnd = 4.0;
-	//rss[0].AngleRange.targetRangeStart = 0.01*PI;
-	//rss[0].AngleRange.targetRangeEnd = PI;
-	//rss[0].DegreesOfAtrraction = 2;
-	//rss[0].SourceIndex = 0;
-	//rss[0].TargetIndex = 1;
+	relationshipStruct rss[1];
+	rss[0].TargetRange.targetRangeStart = 2.0;
+	rss[0].TargetRange.targetRangeEnd = 4.0;
+	rss[0].DegreesOfAtrraction = 2;
+	rss[0].SourceIndex = 0;
+	rss[0].TargetIndex = 1;
 
-	guassianRelationshipStruct rss[1];
-	rss->mean[0] = 0;
-	rss->deviation[0] = 1;
-	rss->mean[1] = 0;
-	rss->deviation[1] = 1;
-	rss->mean[2] = 0;
-	rss->deviation[2] = 0;
-	rss->SourceIndex = 0;
-	rss->TargetIndex = 1;
+	//It looks like we still have to pass in a dummy gaussian
+	gaussianRelationshipStruct gss[1];
+	gss->mean[0] = 0;
+	gss->deviation[0] = 1;
+	gss->mean[1] = 0;
+	gss->deviation[1] = 1;
+	gss->mean[2] = 0;
+	gss->deviation[2] = 0;
+	gss->SourceIndex = 0;
+	gss->TargetIndex = 1;
 
 	//for (int i = 0; i < NRel; i++) {
 	//	rss[i].TargetRange.targetRangeStart = 0.0;
@@ -1369,7 +887,7 @@ int main(int argc, char **argv)
 	//}
 
 	// Point test code:
-	result *result = KernelGaussianWrapper(rss, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, &gpuCfg);
+	result *result = KernelWrapper(rss, gss, cfg, clearances, offlimits, vtx, surfaceRectangle, &srf, groups, &gpuCfg);
 	printf("Results:\n");
 	for (int i = 0; i < gpuCfg.gridxDim; i++)
 	{
